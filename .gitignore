@@ -1,0 +1,65 @@
+# --- Python / tooling -------------------------------------------------------
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+*.egg-info/
+dist/
+build/
+.coverage
+htmlcov/
+
+# --- Secrets and runtime state: NEVER commit --------------------------------
+.env
+.env.*
+!.env.example
+secrets/
+data/
+tmp/
+*.sqlite
+*.sqlite3
+*.db
+*.db-wal
+*.db-shm
+*.session
+cookies*.txt
+*.pem
+*.key
+*.p12
+
+# --- Private live-test corpus (permission-cleared URLs stay out of Git) -----
+tests/live/corpus.txt
+tests/live/corpus.*.txt
+!tests/live/corpus.example.txt
+tests/live/*.local.*
+ops/feasibility-raw/
+
+# --- Downloaded third-party media: never commit -------------------------------
+# Synthetic fixtures are generated at test time; if a synthetic media file is ever
+# genuinely needed in the repo, add it explicitly with `git add -f`.
+downloads/
+tests/downloads/
+*.mp4
+*.m4v
+*.mov
+*.webm
+*.mkv
+*.avi
+*.mp3
+*.m4a
+*.opus
+*.jpg
+*.jpeg
+*.png
+*.webp
+*.gif
+*.heic
+*.avif
+
+# --- OS / editor --------------------------------------------------------------
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

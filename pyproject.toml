@@ -1,0 +1,63 @@
+[project]
+name = "telegram-media-downloader"
+version = "0.1.0"
+description = "Private, self-hosted Telegram bot that returns media from supported social media post URLs"
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "aiogram>=3.34,<3.35",
+    # Extractors are pinned EXACTLY. Bump only after the offline suite and the live
+    # feasibility probe (scripts/feasibility_probe.py) pass against the new version.
+    "yt-dlp==2026.11.23",
+    "gallery-dl==1.32.21",
+    "pydantic>=2.14,<3",
+    "pydantic-settings>=2.16,<3",
+    # aiohttp is already required by aiogram; it is also used for the worker service,
+    # the egress proxy and safe redirect resolution (pinned-DNS resolver).
+    "aiohttp>=3.14,<4",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.2,<10",
+    "pytest-asyncio>=1.5,<2",
+    "ruff>=0.15",
+]
+
+[tool.uv]
+# This is an application, not a distributable package: nothing is built/installed,
+# the repository root is simply put on sys.path (see [tool.pytest.ini_options]).
+package = false
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+pythonpath = ["."]
+testpaths = ["tests"]
+addopts = "-ra -m 'not live and not docker'"
+markers = [
+    "live: opt-in tests against real platforms/Telegram using the private corpus (never run by default)",
+    "docker: tests that need a running Docker daemon (never run by default)",
+    "posix: tests that only make sense on Linux/macOS",
+]
+filterwarnings = [
+    "error::pytest.PytestUnraisableExceptionWarning",
+]
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+extend-exclude = [".venv", "tmp", "data"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "S", "ASYNC", "RUF"]
+ignore = [
+    "S101",   # asserts are fine in tests and for invariants
+    "S603",   # subprocess is used deliberately with argument arrays and shell=False
+    "S607",   # partial executable paths are resolved via explicit config
+    "RUF001", "RUF002", "RUF003",
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S104", "S105", "S106", "S108", "S311", "E501"]
+"scripts/**" = ["E501"]

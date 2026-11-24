@@ -1,0 +1,9 @@
+# Force LF everywhere: files are mounted into Linux containers and shell scripts must not gain CRs.
+* text=auto eol=lf
+
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.mp4 binary
+*.webm binary
+*.sqlite binary

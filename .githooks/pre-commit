@@ -1,0 +1,10 @@
+#!/bin/sh
+# Blocks commits that contain secrets, session cookies, databases or downloaded media (T00.7).
+# Enable once per clone:  git config core.hooksPath .githooks
+for py in python3 python py; do
+  if command -v "$py" >/dev/null 2>&1; then
+    exec "$py" scripts/scan_secrets.py --staged
+  fi
+done
+echo "pre-commit: no python interpreter found; cannot run the secret scan" >&2
+exit 1
