@@ -35,6 +35,7 @@ from app.config import Settings
 from app.core.contracts import JobRecord
 from app.core.errors import ConfigError
 from app.core.job_queue import JobQueue
+from app.core.ports import ExtractionBackend
 from app.core.url_validator import parse_hosts_config
 from app.core.worker import JobRunner
 from app.logging_setup import log_event, setup_logging
@@ -173,6 +174,17 @@ async def amain() -> None:
     except ConfigError as exc:
         log_event(log, logging.CRITICAL, "refusing to start: invalid configuration", problems=str(exc))
         raise SystemExit(2) from exc
+    await run(settings)
+
+
+async def run(
+    settings: Settings,
+    *,
+    extractor: ExtractionBackend | None = None,
+    handle_signals: bool = True,
+) -> None:
+    """Wire everything together and poll until stopped. Separate from `amain` so tests can run the
+    REAL startup/shutdown path against a fake Telegram server with an injected extractor."""
     if not settings.allowed_user_ids:
         log_event(log, logging.WARNING, "ALLOWED_USER_IDS is empty: every request will be rejected")
     if settings.worker_mode == "inprocess":
@@ -202,7 +214,7 @@ async def amain() -> None:
     bot = build_bot(settings)
     session = bot.session
     assert isinstance(session, TrackingSession)
-    extractor = build_extraction_backend(settings)
+    extractor = extractor or build_extraction_backend(settings)
     notifier = TelegramNotifier(bot, db, min_interval=settings.status_edit_min_interval_seconds)
     deliverer = TelegramDeliverer(bot, db, settings, workspaces)
     queue = JobQueue(
@@ -236,7 +248,12 @@ async def amain() -> None:
             worker=settings.worker_mode,
             env=settings.app_env,
         )
-        await dp.start_polling(bot, allowed_updates=["message", "callback_query"], handle_signals=True)
+        await dp.start_polling(
+            bot,
+            allowed_updates=["message", "callback_query"],
+            handle_signals=handle_signals,
+            polling_timeout=settings.polling_timeout_seconds,
+        )
     finally:
         log_event(log, logging.INFO, "shutting down")
         hk.cancel()

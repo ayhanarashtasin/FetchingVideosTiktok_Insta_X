@@ -19,6 +19,7 @@ from app.extractors.gallerydl_runner import GalleryDlRunner
 from app.extractors.resolver import ShortLinkResolver
 from app.extractors.router import build_adapters, route
 from app.extractors.ytdlp_runner import YtDlpRunner
+from app.media.prepare import prepare_assets
 from app.services.subprocess_runner import ProcessRunner, SubprocessRunner
 
 
@@ -68,7 +69,7 @@ class LocalExtractionBackend:
         self, request: ExtractionRequest, manifest: PostManifest, workspace: Path, deadline: Deadline
     ) -> ExtractionResult:
         outcome = await route(self.adapters, request.platform).fetch(request, manifest, workspace, deadline)
-        return await finalize_outcome(
+        result = await finalize_outcome(
             outcome,
             manifest,
             workspace,
@@ -76,6 +77,14 @@ class LocalExtractionBackend:
             max_total_bytes=self.settings.max_temp_bytes_per_job,
             max_items=self.settings.max_items_per_job,
         )
+        # The one permitted transformation: a provably lossless stream-copy remux (Media mode only).
+        assets = await prepare_assets(
+            result.assets,
+            mode=request.delivery_mode,
+            native_hevc=self.settings.native_hevc,
+            runner=self.runner,
+        )
+        return result.model_copy(update={"assets": assets})
 
     async def health(self) -> bool:
         return True  # in-process: nothing to be unreachable

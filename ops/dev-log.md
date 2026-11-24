@@ -153,3 +153,42 @@ tiktok,instagram,twitter,router,finalize,local,factory}.py`, `app/media/{probe,q
   access/auth/rate/challenge errors; short links are resolved with per-hop validation and pinned DNS.
 * NOT ESTABLISHED: that any platform currently serves those shapes. See `ops/feasibility.md` section 5 for the nine
   assumptions (A1-A9) a live run must confirm. `tests/live/test_live_corpus.py` and the probe are ready for that.
+
+---
+
+## Phase 4 - quality preservation and Telegram delivery (2026-11-24)
+
+Built: `app/media/{prepare,delivery_plan}.py`, `app/services/telegram_sender.py` (+ `FdInputFile`),
+`scripts/telegram_smoke.py`, `app.main.run()` (testable startup), and the test doubles
+`tests/fake_telegram.py` (a fake Bot API **HTTP server**), `tests/e2e.py`.
+
+| Check | Command | Result |
+| --- | --- | --- |
+| Whole suite, Windows | `uv run pytest -q` | PASS (see final numbers in the Phase 6 section) |
+| **Whole suite, Linux** | `docker build --target test -t tmd-test . && docker run --rm tmd-test` | **PASS - 812 passed, 3 skipped** |
+| **AT15 merge, real tools** | `tests/integration/test_merge_separate_tracks.py` | PASS - local HLS master with a SEPARATE audio rendition; real yt-dlp lists video-only + audio-only, our selector picks the merge, yt-dlp stream-copies; **decoded frames and samples are identical** to the source renditions (no re-encode), audio retained |
+| **AT16 remux, real ffmpeg** | `tests/unit/test_prepare_remux.py`, same file above | PASS - MKV(H.264/AAC) -> MP4 with bit-identical packets (`-f streamhash`); VP9/Opus and HEVC(off) are never transcoded; unverifiable output is discarded |
+| End-to-end vs fake Telegram HTTP server | `tests/integration/test_e2e_fake_telegram.py` | PASS (14) - the real `app.main.run` + real aiogram client: a user message becomes a media group whose multipart bytes are **identical to the source files**, in source order, with the exact submitted URL, then the real "Original files" button re-delivers documents |
+
+### Bugs / flaws found by the tests and fixed
+* The remux test first compared DECODED audio and failed: AAC-in-MP4 stores encoder-delay "priming" samples in an edit
+  list, so decoders legitimately drop 1024 samples. The right proof for a remux is packet equality; for a merge across a
+  framing change (TS -> MKV) it is decoded equality. Each claim now uses the matching proof.
+* `prepare_assets(ffmpeg="")` fell through `or` to the PATH lookup, so "FFmpeg unavailable" could not be expressed.
+* `getMe` in aiogram 3.34 returns `BotFullInfo` with 15 required fields; the fake server derives them from the installed
+  model so it cannot drift.
+* aiogram only raises its flood-wait exception for a POSITIVE `retry_after`; an unrecognised 429 is classified
+  conservatively as an ambiguous outcome (never auto-replayed).
+* Test-quality: a smoke-script test contained `... or True` hedging; replaced by a fake server that models the hosted size
+  ceiling (413) so hosted-refuses / local-accepts / unexpected-outcome verdicts are deterministic. An e2e helper had two
+  constant-returning stubs (`_busy`, `_polled`); replaced by real readiness/idleness checks.
+
+### Verified by hand
+* `scripts/telegram_smoke.py --large` generator: 71 MB synthetic file in 31 s (> the 50 MB hosted limit).
+
+### What Phase 4 does and does NOT establish
+* ESTABLISHED: planning rules (native vs document, caps, 2-10 batching, runs, captions with the exact URL, link message,
+  button placement), byte-exact streaming from a verified file descriptor, definite-vs-ambiguous failure classification,
+  no replay after an uncertain send, lossless-only video preparation, honest PARTIAL/UNVERIFIED/DELIVERY_UNKNOWN states.
+* NOT ESTABLISHED: behaviour of the REAL Telegram service and clients (T01.8/T01.9/T06.6): whether it accepts every
+  album shape, that videos play on Android/iOS, the real hosted size ceiling, the real local Bot API server.

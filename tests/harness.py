@@ -20,7 +20,7 @@ from app.core.worker import JobRunner
 from app.main import build_dispatcher
 from app.services.cleanup import WorkspaceManager
 from app.storage.db import Database
-from tests.fakes import FakeDeliverer, FakeExtractor, FakeSession, RecordingNotifier, make_bot, test_settings
+from tests.fakes import FakeDeliverer, FakeExtractor, FakeSession, RecordingNotifier, build_test_settings, make_bot
 
 
 @dataclass
@@ -65,7 +65,7 @@ async def build_app(
     start_workers: bool = True,
     **settings_overrides: Any,
 ) -> App:
-    settings = test_settings(tmp_path, **settings_overrides)
+    settings = build_test_settings(tmp_path, **settings_overrides)
     db = Database(":memory:")
     db.migrate()
     workspaces = WorkspaceManager(settings.work_dir, orphan_ttl=timedelta(minutes=30))

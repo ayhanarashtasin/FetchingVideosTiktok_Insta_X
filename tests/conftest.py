@@ -234,3 +234,52 @@ def stream_hash(path: Path, selector: str = "0:v:0") -> str:
         timeout=60,
     ).stdout.strip()
     return out.rsplit("=", 1)[-1]
+
+
+def decoded_md5(path: Path | str, kind: str = "v") -> str:
+    """MD5 of the DECODED video frames (`v`) or audio samples (`a`) of the first such stream.
+
+    Unlike `stream_hash` this survives a container/bitstream-framing change (e.g. MPEG-TS Annex-B ->
+    Matroska AVCC), yet it can never match after a re-encode: identical decoded output proves the compressed
+    data was copied, not regenerated.
+    """
+    assert FFMPEG is not None
+    out = subprocess.run(
+        [FFMPEG, "-nostdin", "-v", "error", "-i", str(path), "-map", f"0:{kind}:0", "-f", "md5", "-"],
+        check=True, capture_output=True, text=True, timeout=120,
+    ).stdout.strip()  # fmt: skip
+    return out.removeprefix("MD5=")
+
+
+@pytest.fixture(scope="session")
+def hls_dir(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """A local HLS master playlist whose AUDIO is a separate rendition - a real 'separate tracks' source."""
+    if not (FFMPEG and FFPROBE):
+        pytest.skip("ffmpeg/ffprobe not available on PATH")
+    root = tmp_path_factory.mktemp("hls")
+    _ffmpeg(
+        "-f", "lavfi", "-i", "testsrc=size=160x120:rate=10",
+        "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=44100",
+        "-t", "3", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac",
+        "-f", "hls", "-hls_time", "1", "-hls_playlist_type", "vod", "-master_pl_name", "master.m3u8",
+        "-var_stream_map", "v:0,agroup:aud a:0,agroup:aud,default:yes",
+        "-hls_segment_filename", str(root / "stream_%v_%03d.ts"), str(root / "stream_%v.m3u8"),
+    )  # fmt: skip
+    return root
+
+
+@pytest.fixture(scope="session")
+def hls_server(hls_dir: Path) -> Iterator[str]:
+    class Handler(_QuietHandler):
+        def guess_type(self, path: str) -> str:
+            return "application/vnd.apple.mpegurl" if str(path).endswith(".m3u8") else super().guess_type(path)
+
+    httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), functools.partial(Handler, directory=str(hls_dir)))
+    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{httpd.server_address[1]}"
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+        thread.join(timeout=5)

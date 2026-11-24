@@ -126,6 +126,7 @@ class Settings(BaseSettings):
 
     # --- operations ------------------------------------------------------------------
     log_level: str = "INFO"
+    polling_timeout_seconds: Annotated[int, Field(ge=1, le=50)] = 10
     heartbeat_interval_seconds: Annotated[int, Field(ge=1, le=300)] = 15
     heartbeat_max_age_seconds: Annotated[int, Field(ge=5, le=3600)] = 90
     alerts_enabled: bool = False

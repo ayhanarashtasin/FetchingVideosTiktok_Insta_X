@@ -13,7 +13,7 @@ from typing import Any
 from aiogram import Bot
 from aiogram.client.session.base import BaseSession
 from aiogram.methods import TelegramMethod
-from aiogram.types import CallbackQuery, Chat, Message, Update, User
+from aiogram.types import CallbackQuery, Chat, InputFile, Message, Update, User
 
 from app.bot.messages import FinalReport
 from app.config import Settings
@@ -46,6 +46,8 @@ class FakeSession(BaseSession):
     def __init__(self) -> None:
         super().__init__()
         self.calls: list[TelegramMethod] = []
+        self.uploads: list[tuple[str | None, bytes]] = []
+        self.timeouts: list[int | None] = []
         self.fail: Callable[[TelegramMethod], Exception | None] | None = None
         self._ids = itertools.count(5000)
 
@@ -65,12 +67,14 @@ class FakeSession(BaseSession):
         timeout: int | None = None,
     ) -> Any:
         self.calls.append(method)
+        self.timeouts.append(timeout)
         if self.fail is not None:
             exc = self.fail(method)
             if exc is not None:
                 raise exc
         name = type(method).__name__
         chat_id = getattr(method, "chat_id", 0)
+        await self._drain_uploads(bot, method)
         if name in {"SendMessage"}:
             return self._message(chat_id, getattr(method, "text", None))
         if name in {"SendPhoto", "SendVideo", "SendDocument"}:
@@ -80,6 +84,18 @@ class FakeSession(BaseSession):
         if name in {"EditMessageText", "EditMessageReplyMarkup", "EditMessageCaption"}:
             return self._message(chat_id)
         return True
+
+    async def _drain_uploads(self, bot: Bot, method: TelegramMethod) -> None:
+        """Read every InputFile of a successful request, as the real HTTP layer would, so tests can
+        assert on the exact bytes that would reach Telegram."""
+        files = [
+            v for v in (getattr(method, a, None) for a in ("photo", "video", "document")) if isinstance(v, InputFile)
+        ]
+        media = getattr(method, "media", None)
+        if isinstance(media, list):
+            files += [m.media for m in media if isinstance(getattr(m, "media", None), InputFile)]
+        for f in files:
+            self.uploads.append((f.filename, b"".join([chunk async for chunk in f.read(bot)])))
 
     def of(self, name: str) -> list[TelegramMethod]:
         return [c for c in self.calls if type(c).__name__ == name]
@@ -333,7 +349,7 @@ class RecordingNotifier:
         return [t for _, t in self.statuses]
 
 
-def test_settings(tmp_path: Path, **overrides: Any) -> Settings:
+def build_test_settings(tmp_path: Path, **overrides: Any) -> Settings:
     base: dict[str, Any] = {
         "bot_token": fake_bot_token(),
         "allowed_user_ids": [OWNER],
