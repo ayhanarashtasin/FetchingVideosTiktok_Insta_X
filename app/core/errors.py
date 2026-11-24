@@ -26,6 +26,8 @@ class ErrorCode(StrEnum):
     DELIVERY_UNKNOWN = "DELIVERY_UNKNOWN"
     CANCELLED = "CANCELLED"
     INTERRUPTED = "INTERRUPTED"
+    # Additive to architecture section 14: an unexpected bug on our side (never a platform fault).
+    INTERNAL_ERROR = "INTERNAL_ERROR"
 
 
 # Codes for which an automatic, bounded retry may be attempted (FR-16). Everything else is
@@ -44,6 +46,7 @@ _OWNER_RETRY_CODES = frozenset(
         ErrorCode.UPLOAD_FAILED,
         ErrorCode.DELIVERY_UNKNOWN,
         ErrorCode.INTERRUPTED,
+        ErrorCode.INTERNAL_ERROR,
     }
 )
 

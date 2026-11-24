@@ -20,7 +20,7 @@ Test command used throughout: `uv run pytest -q` (default run excludes `live` an
 | FFmpeg / FFprobe | `ffmpeg -version` | PASS - 9.0.2 (gyan.dev full build; has libx264, libx265, libvpx-vp9, libopus) |
 | uv | `uv --version` | PASS - 0.13.1 |
 | Docker client / Compose | `docker --version`, `docker compose version` | PASS - 29.6.1 / v5.2.0 |
-| **Docker daemon** | `docker info` | **FAIL - not running** (`open //./pipe/dockerDesktopLinuxEngine: The system cannot find the file specified`). Containers could not be built or run at this point. |
+| **Docker daemon** | `docker info` | initially **FAIL - not running** (`open //./pipe/dockerDesktopLinuxEngine: The system cannot find the file specified`). Docker Desktop was then started (`Start-Process "Docker Desktop.exe"`); `docker info` -> server 29.6.1, linux, 12 CPUs, 8 GB. **PASS** from then on. |
 | Network / PyPI | `uv pip install --dry-run ...` | PASS - dependencies resolved |
 
 Resolved dependency set (see `uv.lock`): aiogram 3.34.0, yt-dlp 2026.11.23, gallery-dl 1.32.21,
@@ -75,3 +75,42 @@ pydantic 2.14.4, pydantic-settings 2.16.3, aiohttp 3.14.5, pytest 9.2.0, pytest-
 
 T01.1-T01.6 (live extraction), T01.8 (hosted Telegram delivery), T01.9 (local Bot API), and therefore
 T01.10 (matrix still entirely "Not tested").
+
+---
+
+## Phase 2 - Telegram interface and job infrastructure (2026-11-24)
+
+Built: `app/storage` (SQLite + migration), `app/core/job_queue.py`, `worker.py` (state machine), `retry.py`,
+`deadline.py`, `ports.py`, `app/services/cleanup.py` (workspaces), `app/bot/*` (auth, handlers, callbacks,
+notifier, messages, middleware, keyboards), `app/logging_setup.py`, `app/services/health.py`, `app/main.py`.
+
+| Check | Command | Result |
+| --- | --- | --- |
+| Unit + integration suite, Windows | `uv run pytest -q` | PASS - 445 passed, 5 skipped (symlinks need privileges on Windows) |
+| **Same suite on Linux** | `docker build --target test -t tmd-test . && docker run --rm tmd-test` | **PASS - 462 passed, 2 skipped** (the 2 need a `.git` directory; covered on the host). The 5 Windows-skipped symlink-escape tests **ran and passed**; permission bits (0700/0770) asserted. |
+| Lint | `uv run ruff check app scripts tests` | PASS |
+| Secret scan of the whole repo | `python scripts/scan_secrets.py --all` | PASS |
+
+Docker base image is pinned by digest (`sha256:82836454...`), read from the registry with
+`docker buildx imagetools inspect python:3.12-slim-bookworm` (the local `docker image inspect` could not
+resolve the tag under the containerd image store, so the registry was used as the authority).
+
+### Bugs the tests caught (all fixed)
+* A module-level aiogram `Router` can only attach to one `Dispatcher`; a second app instance raised
+  `RuntimeError`. Handlers now use router factories (`create_router()`).
+* `TelegramNotifier.finish()` could raise when the initial status send had also failed.
+* Test mistakes (not product bugs): a TTL test created its "fresh" job before advancing the fake clock; a
+  "hostile URL" DB test was blocked by the validator before reaching the DB (kept both layers tested).
+
+### Mutation checks (tests must fail when the invariant is broken)
+Optimistic UNVERIFIED->COMPLETED, skipped workspace cleanup, allowing non-public access, ignoring unknown
+send outcomes: each made 2-8 tests fail; originals restored (`41 passed`).
+
+### Phase 2 exit criteria (as tested with in-memory fakes - NOT against real Telegram)
+* owner sends a URL -> acknowledgement from a job whose extractor is a stub; the handler never calls the extractor;
+* unauthorized users/groups/bots/foreign callbacks -> zero replies, zero DB rows, zero extractor calls;
+* queued / running / cancelled / failed jobs transition per the lifecycle diagram; illegal transitions raise;
+* duplicate Telegram updates and duplicate callbacks create exactly one job.
+
+Not done: running the real bot against Telegram (needs a token, T00.4); `app.main` cannot start yet because
+the real extractor backend (Phase 3) and Telegram sender (Phase 4) are not written.

@@ -258,6 +258,8 @@ class DeliveryOutcome(_Model):
     failed_positions: list[int] = Field(default_factory=list)
     unknown_positions: list[int] = Field(default_factory=list)
     completeness: Completeness = Completeness.FAILED
+    # Why each failed position failed (additive to the architecture contract; used for messages).
+    failure_codes: dict[int, ErrorCode] = Field(default_factory=dict)
 
 
 class JobRecord(_Model):
