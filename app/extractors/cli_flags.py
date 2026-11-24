@@ -31,7 +31,7 @@ YTDLP_REQUIRED_FLAGS: tuple[str, ...] = (
     "--no-mtime",
     "--no-part",
     "--no-progress",
-    "--print",
+    "--print-to-file",
 )
 
 GALLERYDL_REQUIRED_FLAGS: tuple[str, ...] = (
@@ -58,8 +58,4 @@ def missing_flags(help_text: str, required: tuple[str, ...]) -> list[str]:
     """Flags from `required` that do not appear as whole option names in `help_text`."""
     import re
 
-    return [
-        flag
-        for flag in required
-        if not re.search(rf"(?<![\w-]){re.escape(flag)}(?![\w-])", help_text)
-    ]
+    return [flag for flag in required if not re.search(rf"(?<![\w-]){re.escape(flag)}(?![\w-])", help_text)]

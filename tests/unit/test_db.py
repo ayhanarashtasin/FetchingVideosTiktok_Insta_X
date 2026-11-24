@@ -113,7 +113,10 @@ def test_legal_lifecycle_and_illegal_transitions(db):
         ((JobState.RUNNING, JobState.FAILED), JobState.FAILED),
         ((JobState.CANCELLED,), JobState.CANCELLED),
         ((JobState.RUNNING, JobState.PREPARING, JobState.CANCELLED), JobState.CANCELLED),
-        ((JobState.RUNNING, JobState.PREPARING, JobState.UPLOADING, JobState.DELIVERY_UNKNOWN), JobState.DELIVERY_UNKNOWN),
+        (
+            (JobState.RUNNING, JobState.PREPARING, JobState.UPLOADING, JobState.DELIVERY_UNKNOWN),
+            JobState.DELIVERY_UNKNOWN,
+        ),
         ((JobState.RUNNING, JobState.PREPARING, JobState.UPLOADING, JobState.UNVERIFIED), JobState.UNVERIFIED),
         ((JobState.RUNNING, JobState.INTERRUPTED), JobState.INTERRUPTED),
     ],

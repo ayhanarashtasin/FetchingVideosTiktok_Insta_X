@@ -22,9 +22,7 @@ from app.config import Settings
 FFMPEG = shutil.which("ffmpeg")
 FFPROBE = shutil.which("ffprobe")
 
-requires_ffmpeg = pytest.mark.skipif(
-    not (FFMPEG and FFPROBE), reason="ffmpeg/ffprobe not available on PATH"
-)
+requires_ffmpeg = pytest.mark.skipif(not (FFMPEG and FFPROBE), reason="ffmpeg/ffprobe not available on PATH")
 
 
 def fake_bot_token() -> str:
@@ -95,17 +93,89 @@ def media(tmp_path_factory: pytest.TempPathFactory) -> SyntheticMedia:
     _ffmpeg("-f", "lavfi", "-i", "testsrc2=size=200x100:rate=1", "-frames:v", "1", str(m.png))
     _ffmpeg("-f", "lavfi", "-i", "testsrc=size=40x1000:rate=1", "-frames:v", "1", str(m.tall_jpg))
     common_v = ["-c:v", "libx264", "-pix_fmt", "yuv420p", "-preset", "ultrafast"]
-    _ffmpeg("-f", "lavfi", "-i", src, "-f", "lavfi", "-i", tone, "-t", "1", *common_v,
-            "-c:a", "aac", "-shortest", str(m.mp4_h264_aac))
+    _ffmpeg(
+        "-f",
+        "lavfi",
+        "-i",
+        src,
+        "-f",
+        "lavfi",
+        "-i",
+        tone,
+        "-t",
+        "1",
+        *common_v,
+        "-c:a",
+        "aac",
+        "-shortest",
+        str(m.mp4_h264_aac),
+    )
     _ffmpeg("-f", "lavfi", "-i", src, "-t", "1", *common_v, "-an", str(m.mp4_h264_silent))
-    _ffmpeg("-f", "lavfi", "-i", src, "-f", "lavfi", "-i", tone, "-t", "1", *common_v,
-            "-c:a", "aac", "-shortest", str(m.mkv_h264_aac))
-    _ffmpeg("-f", "lavfi", "-i", src, "-f", "lavfi", "-i", tone, "-t", "1",
-            "-c:v", "libvpx-vp9", "-b:v", "200k", "-deadline", "realtime", "-cpu-used", "8",
-            "-c:a", "libopus", "-shortest", str(m.webm_vp9_opus))
-    _ffmpeg("-f", "lavfi", "-i", src, "-f", "lavfi", "-i", tone, "-t", "1",
-            "-c:v", "libx265", "-pix_fmt", "yuv420p", "-preset", "ultrafast",
-            "-tag:v", "hvc1", "-c:a", "aac", "-shortest", str(m.mp4_hevc_aac))
+    _ffmpeg(
+        "-f",
+        "lavfi",
+        "-i",
+        src,
+        "-f",
+        "lavfi",
+        "-i",
+        tone,
+        "-t",
+        "1",
+        *common_v,
+        "-c:a",
+        "aac",
+        "-shortest",
+        str(m.mkv_h264_aac),
+    )
+    _ffmpeg(
+        "-f",
+        "lavfi",
+        "-i",
+        src,
+        "-f",
+        "lavfi",
+        "-i",
+        tone,
+        "-t",
+        "1",
+        "-c:v",
+        "libvpx-vp9",
+        "-b:v",
+        "200k",
+        "-deadline",
+        "realtime",
+        "-cpu-used",
+        "8",
+        "-c:a",
+        "libopus",
+        "-shortest",
+        str(m.webm_vp9_opus),
+    )
+    _ffmpeg(
+        "-f",
+        "lavfi",
+        "-i",
+        src,
+        "-f",
+        "lavfi",
+        "-i",
+        tone,
+        "-t",
+        "1",
+        "-c:v",
+        "libx265",
+        "-pix_fmt",
+        "yuv420p",
+        "-preset",
+        "ultrafast",
+        "-tag:v",
+        "hvc1",
+        "-c:a",
+        "aac",
+        "-shortest",
+        str(m.mp4_hevc_aac),
+    )
     _ffmpeg("-f", "lavfi", "-i", src, "-t", "1", *common_v, "-an", str(m.video_only_mp4))
     _ffmpeg("-f", "lavfi", "-i", tone, "-t", "1", "-c:a", "aac", str(m.audio_only_m4a))
     m.broken_jpg.write_bytes(b"<html><body>429 Too Many Requests</body></html>")
@@ -141,8 +211,26 @@ def stream_hash(path: Path, selector: str = "0:v:0") -> str:
     """
     assert FFMPEG is not None
     out = subprocess.run(
-        [FFMPEG, "-nostdin", "-v", "error", "-i", str(path), "-map", selector, "-c", "copy",
-         "-f", "streamhash", "-hash", "sha256", "-"],
-        check=True, capture_output=True, text=True, timeout=60,
+        [
+            FFMPEG,
+            "-nostdin",
+            "-v",
+            "error",
+            "-i",
+            str(path),
+            "-map",
+            selector,
+            "-c",
+            "copy",
+            "-f",
+            "streamhash",
+            "-hash",
+            "sha256",
+            "-",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=60,
     ).stdout.strip()
     return out.rsplit("=", 1)[-1]

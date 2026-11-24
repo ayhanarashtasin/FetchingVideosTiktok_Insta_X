@@ -54,7 +54,10 @@ class TrackingSession(AiohttpSession):
     last_poll_ok: float | None = None
 
     async def make_request(
-        self, bot: Bot, method: TelegramMethod, timeout: int | None = None  # noqa: ASYNC109 - aiogram's signature
+        self,
+        bot: Bot,
+        method: TelegramMethod,
+        timeout: int | None = None,
     ):  # type: ignore[override]
         result = await super().make_request(bot, method, timeout)
         if isinstance(method, GetUpdates):
@@ -116,7 +119,9 @@ async def notify_interrupted(bot: Bot, jobs: list[JobRecord]) -> None:
             continue
         try:
             await bot.send_message(
-                job.chat_id, text, reply_markup=retry_keyboard(job.id),
+                job.chat_id,
+                text,
+                reply_markup=retry_keyboard(job.id),
                 reply_parameters=ReplyParameters(message_id=job.origin_message_id, allow_sending_without_reply=True),
             )
         except Exception as exc:
@@ -138,8 +143,14 @@ async def housekeeping(
             poll_age = None if session.last_poll_ok is None else time.monotonic() - session.last_poll_ok
             write_heartbeat(
                 settings.heartbeat_file,
-                Heartbeat(ts=time.time(), poll_age=poll_age, db_ok=db.check_writable(), worker_ok=worker_ok,
-                          disk_free=free, started=started),
+                Heartbeat(
+                    ts=time.time(),
+                    poll_age=poll_age,
+                    db_ok=db.check_writable(),
+                    worker_ok=worker_ok,
+                    disk_free=free,
+                    started=started,
+                ),
             )
             if free < settings.min_free_disk_bytes:
                 log_event(log, logging.WARNING, "low disk space", free_mb=free // 1_000_000)
@@ -174,12 +185,19 @@ async def amain() -> None:
     db = Database(settings.db_path)
     db.migrate()
     workspaces = WorkspaceManager(
-        settings.work_dir, orphan_ttl=timedelta(minutes=settings.orphan_ttl_minutes),
+        settings.work_dir,
+        orphan_ttl=timedelta(minutes=settings.orphan_ttl_minutes),
         shared_group=settings.worker_mode == "remote",
     )
     report = recover_on_startup(db, workspaces)
-    log_event(log, logging.INFO, "startup recovery", interrupted=len(report.interrupted),
-              removed_workspaces=len(report.removed_workspaces), purged_jobs=report.purged.jobs)
+    log_event(
+        log,
+        logging.INFO,
+        "startup recovery",
+        interrupted=len(report.interrupted),
+        removed_workspaces=len(report.removed_workspaces),
+        purged_jobs=report.purged.jobs,
+    )
 
     bot = build_bot(settings)
     session = bot.session
@@ -193,10 +211,16 @@ async def amain() -> None:
         max_active_per_user=settings.max_active_jobs_per_user,
         max_concurrent=settings.max_concurrent_jobs,
     )
-    runner = JobRunner(settings=settings, db=db, extractor=extractor, deliverer=deliverer,
-                       notifier=notifier, workspaces=workspaces)
-    ctx = AppContext(settings=settings, db=db, queue=queue, notifier=notifier,
-                     extra_hosts=parse_hosts_config(settings.extra_allowed_hosts))
+    runner = JobRunner(
+        settings=settings, db=db, extractor=extractor, deliverer=deliverer, notifier=notifier, workspaces=workspaces
+    )
+    ctx = AppContext(
+        settings=settings,
+        db=db,
+        queue=queue,
+        notifier=notifier,
+        extra_hosts=parse_hosts_config(settings.extra_allowed_hosts),
+    )
     dp = build_dispatcher(settings, ctx)
 
     started = time.time()
@@ -204,8 +228,14 @@ async def amain() -> None:
     queue.start(runner)
     try:
         await notify_interrupted(bot, report.interrupted)
-        log_event(log, logging.INFO, "bot started", mode=settings.bot_api_mode, worker=settings.worker_mode,
-                  env=settings.app_env)
+        log_event(
+            log,
+            logging.INFO,
+            "bot started",
+            mode=settings.bot_api_mode,
+            worker=settings.worker_mode,
+            env=settings.app_env,
+        )
         await dp.start_polling(bot, allowed_updates=["message", "callback_query"], handle_signals=True)
     finally:
         log_event(log, logging.INFO, "shutting down")

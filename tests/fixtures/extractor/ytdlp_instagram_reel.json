@@ -1,0 +1,35 @@
+{
+ "_synthetic": true,
+ "duration": 8.0,
+ "extractor_key": "Instagram",
+ "formats": [
+  {
+   "acodec": "none",
+   "ext": "mp4",
+   "format_id": "dash-v-low",
+   "height": 960,
+   "tbr": 400.0,
+   "vcodec": "avc1.4d401e",
+   "width": 540
+  },
+  {
+   "acodec": "none",
+   "ext": "mp4",
+   "format_id": "dash-v-high",
+   "height": 1920,
+   "tbr": 2800.0,
+   "vcodec": "avc1.640028",
+   "width": 1080
+  },
+  {
+   "acodec": "mp4a.40.2",
+   "ext": "m4a",
+   "format_id": "dash-a",
+   "tbr": 128.0,
+   "vcodec": "none"
+  }
+ ],
+ "height": 1920,
+ "id": "ABCdef12345",
+ "width": 1080
+}

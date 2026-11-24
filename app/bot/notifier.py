@@ -94,8 +94,9 @@ class TelegramNotifier:
                         pass  # fall through: send a fresh message instead
                 await self._send(job, text, keyboard)
             except TelegramAPIError as exc:  # the notifier must never raise into the job
-                log_event(log, logging.WARNING, "could not deliver final status", job_id=job.id,
-                          error_type=type(exc).__name__)
+                log_event(
+                    log, logging.WARNING, "could not deliver final status", job_id=job.id, error_type=type(exc).__name__
+                )
             finally:
                 self._states.pop(job.id, None)
 

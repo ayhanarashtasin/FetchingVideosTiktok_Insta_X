@@ -147,6 +147,24 @@ never trust a missing `num`.
 3. X may require a session for some tweets; `AUTH_REQUIRED` must be reported, never worked around.
 4. None of these three platforms promises API stability; the live probe is the regression test.
 
+### Assumptions the adapters make that ONLY a live run can confirm
+
+The adapters are fully tested against synthetic outputs, but each of these is an unverified belief about
+the platforms. The live probe / `pytest -m live` should confirm or refute every one; a refuted assumption
+must be recorded here and the adapter changed (or the content type declared blocked).
+
+| # | Assumption | Where | If wrong |
+| --- | --- | --- | --- |
+| A1 | `gallery-dl -j instagram.com/<user>/info/` exposes `is_private` as a real boolean for public AND private accounts | `instagram._discover_story` | every Story is refused (`visibility_unknown`) - safe, but P06/P07 are then blocked until another public-visibility proof exists |
+| A2 | An anonymous (no-session) request can fetch public posts/reels/carousels | `instagram` posts | AUTH_REQUIRED for everything but Stories; owner decides whether to allow a session for posts (needs a public-visibility proof for posts too) |
+| A3 | Instagram Close-Friends / subscriber items carry an `audience` / `subscription` marker in gallery-dl's metadata | `instagram.restricted_marker` | such a Story could pass the filter - this is the single most important item to confirm |
+| A4 | yt-dlp's Instagram `id` for a reel equals the URL shortcode; its X `id` equals (or is prefixed by) the tweet id; TikTok `id` equals the post id | identity checks | valid content is refused (fail closed) |
+| A5 | A video item gallery-dl cannot serve is reported (error / missing file) rather than silently replaced by its preview image | `instagram` carousels | a video could be delivered as a photo; the `/reel/` guard (`preview_only`) covers only Reels |
+| A6 | TikTok `/photo/<id>` returns the photos in `imagePost.images` order with 1-based `num`, and `imagePost` is present in the dump | `tiktok._discover_gallerydl` | completeness shows `unverified` instead of `complete` |
+| A7 | `num` numbering has a gap exactly when gallery-dl skips an item | completeness for Instagram/X | a skipped LAST item is not detectable except through the warning text |
+| A8 | The egress CDN allowlist (platform + CDN host suffixes) covers every host the tools need | `egress_proxy` (Phase 5) | extractor requests are denied by the proxy; the denied host is logged so the list can be extended |
+| A9 | Reels/videos from TikTok commonly offer an HEVC (`bytevc1`) top format | `quality.select_format` | Media mode sends HEVC as a document unless `NATIVE_HEVC=true` (best quality is never traded for compatibility) |
+
 ## 6. How the owner produces the live evidence (one command each)
 
 ```bash

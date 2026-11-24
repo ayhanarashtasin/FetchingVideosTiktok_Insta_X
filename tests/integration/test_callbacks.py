@@ -75,8 +75,16 @@ async def test_button_pressed_from_another_chat_is_refused(app):
     # same user id, but the callback's message lives in a different (private) chat id
     await app.feed(callback_update(original_data(parent.id), user_id=OWNER, chat_id=OWNER))
     assert len(app.notifier.acks) == 2  # sanity: same chat works
-    stray = app.db.new_job_record(job_id="c" * 32, owner_id=OWNER, chat_id=OWNER + 5, origin_message_id=1,
-                                  original_url=GOOD, platform=parent.platform, delivery_mode=DeliveryMode.MEDIA, ttl_hours=24)
+    stray = app.db.new_job_record(
+        job_id="c" * 32,
+        owner_id=OWNER,
+        chat_id=OWNER + 5,
+        origin_message_id=1,
+        original_url=GOOD,
+        platform=parent.platform,
+        delivery_mode=DeliveryMode.MEDIA,
+        ttl_hours=24,
+    )
     app.db.reserve_job(stray, max_active_per_user=9)
     app.db.transition(stray.id, JobState.CANCELLED)
     with pytest.raises(BotError) as exc:
@@ -86,8 +94,19 @@ async def test_button_pressed_from_another_chat_is_refused(app):
 
 @pytest.mark.parametrize(
     "payload",
-    ["orig:", "orig:xyz", "orig:" + "a" * 31, "orig:" + "A" * 32, "orig:" + "a" * 33, "orig:../../etc/passwd",
-     "retry:", "retry:" + "g" * 32, "unknown:thing", "set:", "x" * 64],
+    [
+        "orig:",
+        "orig:xyz",
+        "orig:" + "a" * 31,
+        "orig:" + "A" * 32,
+        "orig:" + "a" * 33,
+        "orig:../../etc/passwd",
+        "retry:",
+        "retry:" + "g" * 32,
+        "unknown:thing",
+        "set:",
+        "x" * 64,
+    ],
 )
 async def test_malformed_callback_payloads_are_answered_and_ignored(app, payload):
     await app.feed(callback_update(payload))
@@ -145,8 +164,16 @@ async def test_retry_reruns_a_retryable_failure_with_the_same_mode(app):
     assert app.db.get_job(failed.id).state is JobState.FAILED  # history is not overwritten
 
 
-@pytest.mark.parametrize("code", [ErrorCode.NOT_FOUND_OR_EXPIRED, ErrorCode.ACCESS_RESTRICTED, ErrorCode.AUTH_REQUIRED,
-                                  ErrorCode.FILE_TOO_LARGE, ErrorCode.LIMIT_EXCEEDED])
+@pytest.mark.parametrize(
+    "code",
+    [
+        ErrorCode.NOT_FOUND_OR_EXPIRED,
+        ErrorCode.ACCESS_RESTRICTED,
+        ErrorCode.AUTH_REQUIRED,
+        ErrorCode.FILE_TOO_LARGE,
+        ErrorCode.LIMIT_EXCEEDED,
+    ],
+)
 async def test_retry_is_not_offered_for_permanent_failures(app, code):
     failed = await finished_job(app, plan=[BotError(code)])
     await app.feed(callback_update(retry_data(failed.id)))
@@ -184,7 +211,9 @@ def test_callback_parsing():
 
 
 async def test_failed_job_final_message_carries_a_retry_button_when_retryable(tmp_path):
-    a = await build_app(tmp_path, real_notifier=True, extractor=FakeExtractor(plan=[BotError(ErrorCode.EXTRACTOR_CHANGED)]))
+    a = await build_app(
+        tmp_path, real_notifier=True, extractor=FakeExtractor(plan=[BotError(ErrorCode.EXTRACTOR_CHANGED)])
+    )
     try:
         await a.feed(message_update(GOOD))
         await a.drain()

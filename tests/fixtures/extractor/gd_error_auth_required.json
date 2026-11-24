@@ -1,0 +1,9 @@
+[
+ [
+  -1,
+  {
+   "error": "AuthRequired",
+   "message": "Account credentials needed to access this story"
+  }
+ ]
+]

@@ -70,8 +70,14 @@ async def on_text(message: Message, ctx: AppContext, owner_id: int) -> None:
     )
     if result.status is SubmitStatus.ACCEPTED and result.handle is not None:
         await ctx.notifier.ack(result.handle.job)  # prompt acknowledgement, before any download
-        log_event(log, logging.INFO, "job accepted", job_id=result.handle.job.id,
-                  platform=validated.platform.value, mode=mode.value)
+        log_event(
+            log,
+            logging.INFO,
+            "job accepted",
+            job_id=result.handle.job.id,
+            platform=validated.platform.value,
+            mode=mode.value,
+        )
     elif result.status is SubmitStatus.DUPLICATE:
         log_event(log, logging.INFO, "duplicate telegram event ignored", message_id=message.message_id)
     elif result.status is SubmitStatus.USER_BUSY:

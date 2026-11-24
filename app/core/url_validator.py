@@ -58,9 +58,7 @@ _CANONICAL_HOST = {
 _URL_TOKEN = re.compile(r"https?://[^\s<>\"'`“”‘’«»]+", re.IGNORECASE)
 _TRAILING = ".,;:!?"
 
-_TT_ITEM = re.compile(
-    r"^/@(?P<user>[A-Za-z0-9_.\-]{1,64})/(?P<kind>video|photo)/(?P<id>\d{6,25})/?$"
-)
+_TT_ITEM = re.compile(r"^/@(?P<user>[A-Za-z0-9_.\-]{1,64})/(?P<kind>video|photo)/(?P<id>\d{6,25})/?$")
 _TT_SHORT_PATH = re.compile(r"^/(?P<code>[A-Za-z0-9]{5,32})/?$")
 _TT_T_SHORT = re.compile(r"^/t/(?P<code>[A-Za-z0-9]{5,32})/?$")
 
@@ -193,19 +191,33 @@ def _validate_tiktok(original: str, host: str, path: str, canonical: str) -> Val
         if not m:
             raise _unsupported("not a tiktok short link", "tiktok_short")
         return ValidatedUrl(
-            original, f"https://{host}/{m['code']}/", Platform.TIKTOK, UrlKind.SHORT_LINK,
-            None, None, None,
+            original,
+            f"https://{host}/{m['code']}/",
+            Platform.TIKTOK,
+            UrlKind.SHORT_LINK,
+            None,
+            None,
+            None,
         )
     if m := _TT_T_SHORT.match(path):
         return ValidatedUrl(
-            original, f"https://{canonical}/t/{m['code']}/", Platform.TIKTOK, UrlKind.SHORT_LINK,
-            None, None, None,
+            original,
+            f"https://{canonical}/t/{m['code']}/",
+            Platform.TIKTOK,
+            UrlKind.SHORT_LINK,
+            None,
+            None,
+            None,
         )
     if m := _TT_ITEM.match(path):
         return ValidatedUrl(
             original,
             f"https://{canonical}/@{m['user']}/{m['kind']}/{m['id']}",
-            Platform.TIKTOK, UrlKind.POST, m["kind"], m["id"], m["user"],
+            Platform.TIKTOK,
+            UrlKind.POST,
+            m["kind"],
+            m["id"],
+            m["user"],
         )
     raise _unsupported("tiktok path is not an individual video/photo post", "tiktok_path")
 
@@ -215,21 +227,36 @@ def _validate_instagram(original: str, path: str, canonical: str) -> ValidatedUr
         raise _unsupported("highlights are not supported", "highlights_unsupported")
     if m := _IG_STORY.match(path):
         return ValidatedUrl(
-            original, f"https://{canonical}/stories/{m['user']}/{m['id']}/",
-            Platform.INSTAGRAM, UrlKind.POST, "story", m["id"], m["user"],
+            original,
+            f"https://{canonical}/stories/{m['user']}/{m['id']}/",
+            Platform.INSTAGRAM,
+            UrlKind.POST,
+            "story",
+            m["id"],
+            m["user"],
         )
     if _IG_STORY_NO_ID.match(path):
         raise _unsupported("story link without an item id", "story_id_required")
     if m := _IG_SHARE.match(path):
         return ValidatedUrl(
-            original, f"https://{canonical}{path if path.endswith('/') else path + '/'}",
-            Platform.INSTAGRAM, UrlKind.SHORT_LINK, None, None, None,
+            original,
+            f"https://{canonical}{path if path.endswith('/') else path + '/'}",
+            Platform.INSTAGRAM,
+            UrlKind.SHORT_LINK,
+            None,
+            None,
+            None,
         )
     if m := _IG_POST.match(path):
         hint = "post" if m["kind"] == "p" else "reel"
         return ValidatedUrl(
-            original, f"https://{canonical}/{m['kind']}/{m['code']}/",
-            Platform.INSTAGRAM, UrlKind.POST, hint, m["code"], m["user"],
+            original,
+            f"https://{canonical}/{m['kind']}/{m['code']}/",
+            Platform.INSTAGRAM,
+            UrlKind.POST,
+            hint,
+            m["code"],
+            m["user"],
         )
     raise _unsupported("instagram path is not an individual post, reel or story", "ig_path")
 
@@ -239,8 +266,13 @@ def _validate_x(original: str, path: str, canonical: str) -> ValidatedUrl:
         user = m["user"]
         username = None if user in {"i", "i/web"} else user
         return ValidatedUrl(
-            original, f"https://{canonical}/{user}/status/{m['id']}",
-            Platform.X, UrlKind.POST, "tweet", m["id"], username,
+            original,
+            f"https://{canonical}/{user}/status/{m['id']}",
+            Platform.X,
+            UrlKind.POST,
+            "tweet",
+            m["id"],
+            username,
         )
     raise _unsupported("x path is not an individual status", "x_path")
 

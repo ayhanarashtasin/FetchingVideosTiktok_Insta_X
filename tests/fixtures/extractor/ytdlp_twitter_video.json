@@ -1,0 +1,28 @@
+{
+ "_synthetic": true,
+ "duration": 6.0,
+ "extractor_key": "Twitter",
+ "formats": [
+  {
+   "acodec": "mp4a",
+   "ext": "mp4",
+   "format_id": "http-832",
+   "height": 360,
+   "tbr": 832.0,
+   "vcodec": "avc1",
+   "width": 640
+  },
+  {
+   "acodec": "mp4a",
+   "ext": "mp4",
+   "format_id": "http-2176",
+   "height": 720,
+   "tbr": 2176.0,
+   "vcodec": "avc1",
+   "width": 1280
+  }
+ ],
+ "height": 720,
+ "id": "1700000000000000000",
+ "width": 1280
+}

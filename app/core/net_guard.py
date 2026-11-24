@@ -148,9 +148,7 @@ async def resolve_public(host: str, *, resolver: Resolver | None = None) -> list
     try:
         addresses = await (resolver or _system_resolver)(host)
     except (OSError, UnicodeError) as exc:
-        raise BotError(
-            ErrorCode.NOT_FOUND_OR_EXPIRED, f"dns failure: {type(exc).__name__}", reason="dns"
-        ) from exc
+        raise BotError(ErrorCode.NOT_FOUND_OR_EXPIRED, f"dns failure: {type(exc).__name__}", reason="dns") from exc
     if not addresses:
         raise BotError(ErrorCode.NOT_FOUND_OR_EXPIRED, "no addresses", reason="dns")
     bad = [a for a in addresses if not is_public_ip(a)]
@@ -165,9 +163,7 @@ class PinnedResolver(aiohttp.abc.AbstractResolver):
     def __init__(self, resolver: Resolver | None = None) -> None:
         self._resolver = resolver
 
-    async def resolve(
-        self, host: str, port: int = 0, family: int = socket.AF_INET
-    ) -> list[dict[str, Any]]:
+    async def resolve(self, host: str, port: int = 0, family: int = socket.AF_INET) -> list[dict[str, Any]]:
         addresses = await resolve_public(host, resolver=self._resolver)
         result: list[dict[str, Any]] = []
         for address in addresses:

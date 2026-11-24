@@ -18,44 +18,120 @@ from app.core.url_validator import (
 
 # (submitted URL, platform, kind, hint, canonical extraction URL)
 ACCEPTED = [
-    ("https://www.tiktok.com/@some.user_1/video/7300000000000000000", Platform.TIKTOK,
-     UrlKind.POST, "video", "https://www.tiktok.com/@some.user_1/video/7300000000000000000"),
-    ("https://www.tiktok.com/@someuser/photo/7300000000000000000?is_from_webapp=1&_r=1",
-     Platform.TIKTOK, UrlKind.POST, "photo",
-     "https://www.tiktok.com/@someuser/photo/7300000000000000000"),
-    ("https://vm.tiktok.com/ZMabcdEfg/", Platform.TIKTOK, UrlKind.SHORT_LINK, None,
-     "https://vm.tiktok.com/ZMabcdEfg/"),
-    ("https://vt.tiktok.com/ZSabcdEfg", Platform.TIKTOK, UrlKind.SHORT_LINK, None,
-     "https://vt.tiktok.com/ZSabcdEfg/"),
-    ("https://www.tiktok.com/t/ZTabcdEfg/", Platform.TIKTOK, UrlKind.SHORT_LINK, None,
-     "https://www.tiktok.com/t/ZTabcdEfg/"),
-    ("https://www.instagram.com/p/ABCdef12345/", Platform.INSTAGRAM, UrlKind.POST, "post",
-     "https://www.instagram.com/p/ABCdef12345/"),
-    ("https://www.instagram.com/p/ABCdef12345/?img_index=2&igsh=xyz", Platform.INSTAGRAM,
-     UrlKind.POST, "post", "https://www.instagram.com/p/ABCdef12345/"),
-    ("https://www.instagram.com/reel/ABCdef12345/", Platform.INSTAGRAM, UrlKind.POST, "reel",
-     "https://www.instagram.com/reel/ABCdef12345/"),
-    ("https://instagram.com/someuser/reel/ABCdef12345/", Platform.INSTAGRAM, UrlKind.POST,
-     "reel", "https://www.instagram.com/reel/ABCdef12345/"),
-    ("https://www.instagram.com/stories/someuser/3000000000000000000/?utm_source=ig_story",
-     Platform.INSTAGRAM, UrlKind.POST, "story",
-     "https://www.instagram.com/stories/someuser/3000000000000000000/"),
-    ("https://www.instagram.com/share/p/BAbcdefGh/", Platform.INSTAGRAM, UrlKind.SHORT_LINK,
-     None, "https://www.instagram.com/share/p/BAbcdefGh/"),
-    ("https://x.com/someuser/status/1700000000000000000", Platform.X, UrlKind.POST, "tweet",
-     "https://x.com/someuser/status/1700000000000000000"),
-    ("https://twitter.com/someuser/status/1700000000000000000?s=20&t=abc", Platform.X,
-     UrlKind.POST, "tweet", "https://x.com/someuser/status/1700000000000000000"),
-    ("https://mobile.twitter.com/someuser/status/1700000000000000000/photo/2", Platform.X,
-     UrlKind.POST, "tweet", "https://x.com/someuser/status/1700000000000000000"),
-    ("https://x.com/i/status/1700000000000000000", Platform.X, UrlKind.POST, "tweet",
-     "https://x.com/i/status/1700000000000000000"),
-    ("HTTPS://X.COM/someuser/status/1700000000000000000", Platform.X, UrlKind.POST, "tweet",
-     "https://x.com/someuser/status/1700000000000000000"),
-    ("http://x.com/someuser/status/1700000000000000000", Platform.X, UrlKind.POST, "tweet",
-     "https://x.com/someuser/status/1700000000000000000"),  # http upgraded for extraction
-    ("https://x.com:443/someuser/status/1700000000000000000", Platform.X, UrlKind.POST,
-     "tweet", "https://x.com/someuser/status/1700000000000000000"),
+    (
+        "https://www.tiktok.com/@some.user_1/video/7300000000000000000",
+        Platform.TIKTOK,
+        UrlKind.POST,
+        "video",
+        "https://www.tiktok.com/@some.user_1/video/7300000000000000000",
+    ),
+    (
+        "https://www.tiktok.com/@someuser/photo/7300000000000000000?is_from_webapp=1&_r=1",
+        Platform.TIKTOK,
+        UrlKind.POST,
+        "photo",
+        "https://www.tiktok.com/@someuser/photo/7300000000000000000",
+    ),
+    ("https://vm.tiktok.com/ZMabcdEfg/", Platform.TIKTOK, UrlKind.SHORT_LINK, None, "https://vm.tiktok.com/ZMabcdEfg/"),
+    ("https://vt.tiktok.com/ZSabcdEfg", Platform.TIKTOK, UrlKind.SHORT_LINK, None, "https://vt.tiktok.com/ZSabcdEfg/"),
+    (
+        "https://www.tiktok.com/t/ZTabcdEfg/",
+        Platform.TIKTOK,
+        UrlKind.SHORT_LINK,
+        None,
+        "https://www.tiktok.com/t/ZTabcdEfg/",
+    ),
+    (
+        "https://www.instagram.com/p/ABCdef12345/",
+        Platform.INSTAGRAM,
+        UrlKind.POST,
+        "post",
+        "https://www.instagram.com/p/ABCdef12345/",
+    ),
+    (
+        "https://www.instagram.com/p/ABCdef12345/?img_index=2&igsh=xyz",
+        Platform.INSTAGRAM,
+        UrlKind.POST,
+        "post",
+        "https://www.instagram.com/p/ABCdef12345/",
+    ),
+    (
+        "https://www.instagram.com/reel/ABCdef12345/",
+        Platform.INSTAGRAM,
+        UrlKind.POST,
+        "reel",
+        "https://www.instagram.com/reel/ABCdef12345/",
+    ),
+    (
+        "https://instagram.com/someuser/reel/ABCdef12345/",
+        Platform.INSTAGRAM,
+        UrlKind.POST,
+        "reel",
+        "https://www.instagram.com/reel/ABCdef12345/",
+    ),
+    (
+        "https://www.instagram.com/stories/someuser/3000000000000000000/?utm_source=ig_story",
+        Platform.INSTAGRAM,
+        UrlKind.POST,
+        "story",
+        "https://www.instagram.com/stories/someuser/3000000000000000000/",
+    ),
+    (
+        "https://www.instagram.com/share/p/BAbcdefGh/",
+        Platform.INSTAGRAM,
+        UrlKind.SHORT_LINK,
+        None,
+        "https://www.instagram.com/share/p/BAbcdefGh/",
+    ),
+    (
+        "https://x.com/someuser/status/1700000000000000000",
+        Platform.X,
+        UrlKind.POST,
+        "tweet",
+        "https://x.com/someuser/status/1700000000000000000",
+    ),
+    (
+        "https://twitter.com/someuser/status/1700000000000000000?s=20&t=abc",
+        Platform.X,
+        UrlKind.POST,
+        "tweet",
+        "https://x.com/someuser/status/1700000000000000000",
+    ),
+    (
+        "https://mobile.twitter.com/someuser/status/1700000000000000000/photo/2",
+        Platform.X,
+        UrlKind.POST,
+        "tweet",
+        "https://x.com/someuser/status/1700000000000000000",
+    ),
+    (
+        "https://x.com/i/status/1700000000000000000",
+        Platform.X,
+        UrlKind.POST,
+        "tweet",
+        "https://x.com/i/status/1700000000000000000",
+    ),
+    (
+        "HTTPS://X.COM/someuser/status/1700000000000000000",
+        Platform.X,
+        UrlKind.POST,
+        "tweet",
+        "https://x.com/someuser/status/1700000000000000000",
+    ),
+    (
+        "http://x.com/someuser/status/1700000000000000000",
+        Platform.X,
+        UrlKind.POST,
+        "tweet",
+        "https://x.com/someuser/status/1700000000000000000",
+    ),  # http upgraded for extraction
+    (
+        "https://x.com:443/someuser/status/1700000000000000000",
+        Platform.X,
+        UrlKind.POST,
+        "tweet",
+        "https://x.com/someuser/status/1700000000000000000",
+    ),
 ]
 
 
@@ -150,7 +226,7 @@ def test_url_embedded_in_text_with_trailing_punctuation():
 
 
 def test_surrounding_quotes_are_not_part_of_the_url():
-    v = parse_message_url('see “https://x.com/someuser/status/1700000000000” please')
+    v = parse_message_url("see “https://x.com/someuser/status/1700000000000” please")
     assert v.original_url == "https://x.com/someuser/status/1700000000000"
 
 

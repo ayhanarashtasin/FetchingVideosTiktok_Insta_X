@@ -65,9 +65,17 @@ async def test_stops_after_max_retries_and_raises_the_last_error():
 
 @pytest.mark.parametrize(
     "code",
-    [ErrorCode.NOT_FOUND_OR_EXPIRED, ErrorCode.ACCESS_RESTRICTED, ErrorCode.AUTH_REQUIRED,
-     ErrorCode.INVALID_URL, ErrorCode.FILE_TOO_LARGE, ErrorCode.MEDIA_INVALID, ErrorCode.EXTRACTOR_CHANGED,
-     ErrorCode.DELIVERY_UNKNOWN, ErrorCode.CANCELLED],
+    [
+        ErrorCode.NOT_FOUND_OR_EXPIRED,
+        ErrorCode.ACCESS_RESTRICTED,
+        ErrorCode.AUTH_REQUIRED,
+        ErrorCode.INVALID_URL,
+        ErrorCode.FILE_TOO_LARGE,
+        ErrorCode.MEDIA_INVALID,
+        ErrorCode.EXTRACTOR_CHANGED,
+        ErrorCode.DELIVERY_UNKNOWN,
+        ErrorCode.CANCELLED,
+    ],
 )
 async def test_permanent_or_unsafe_errors_are_never_retried(code):
     rec = Recorder()
@@ -121,8 +129,15 @@ async def test_cancellation_is_never_swallowed():
 async def test_on_retry_callback_sees_attempt_delay_and_error():
     seen = []
     fn, _ = flaky(1, BotError(ErrorCode.DOWNLOAD_TIMEOUT))
-    await retry_async(fn, max_retries=2, base_delay=2, max_delay=9, rng=lambda: 1.0,
-                      sleep=Recorder().sleep, on_retry=lambda a, d, e: seen.append((a, d, e.code)))
+    await retry_async(
+        fn,
+        max_retries=2,
+        base_delay=2,
+        max_delay=9,
+        rng=lambda: 1.0,
+        sleep=Recorder().sleep,
+        on_retry=lambda a, d, e: seen.append((a, d, e.code)),
+    )
     assert seen == [(1, 2, ErrorCode.DOWNLOAD_TIMEOUT)]
 
 

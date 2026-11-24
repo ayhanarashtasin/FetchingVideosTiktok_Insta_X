@@ -70,7 +70,7 @@ async def _answer(cq: CallbackQuery, text: str | None = None, *, alert: bool = F
 
 # --------------------------------------------------------------------------------------
 async def on_settings(cq: CallbackQuery, ctx: AppContext, owner_id: int) -> None:
-    choice = (cq.data or "")[len(SETTINGS_PREFIX):]
+    choice = (cq.data or "")[len(SETTINGS_PREFIX) :]
     try:
         mode = DeliveryMode(choice)
     except ValueError:

@@ -17,7 +17,10 @@ from app.extractors.cli_flags import (
 def _help(module: str) -> str:
     return subprocess.run(
         [sys.executable, "-m", module, "--help"],
-        capture_output=True, text=True, timeout=60, check=True,
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=True,
     ).stdout
 
 

@@ -93,7 +93,9 @@ async def test_partial_result_replaces_the_status_with_the_outcome_text():
 async def test_finish_falls_back_to_a_new_message_when_the_edit_fails():
     n, session, job, _, _ = setup()
     await n.ack(job)
-    session.fail = lambda m: TelegramBadRequest(m, "message to edit not found") if type(m).__name__ == "EditMessageText" else None
+    session.fail = lambda m: (
+        TelegramBadRequest(m, "message to edit not found") if type(m).__name__ == "EditMessageText" else None
+    )
     await n.finish(job, FinalReport(JobState.FAILED, URL, error=None))
     assert len(session.of("SendMessage")) == 2  # ack + the fallback
     assert messages.INTERNAL_ERROR in session.of("SendMessage")[-1].text

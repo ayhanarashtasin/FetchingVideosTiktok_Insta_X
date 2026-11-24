@@ -28,7 +28,7 @@ class ExtractionBackend(Protocol):
     async def resolve(self, validated: ValidatedUrl, deadline: Deadline) -> ValidatedUrl:
         """Follow a short link safely and return the validated exact-post URL."""
 
-    async def discover(self, request: ExtractionRequest, deadline: Deadline) -> PostManifest: ...
+    async def discover(self, request: ExtractionRequest, workspace: Path, deadline: Deadline) -> PostManifest: ...
 
     async def fetch(
         self, request: ExtractionRequest, manifest: PostManifest, workspace: Path, deadline: Deadline

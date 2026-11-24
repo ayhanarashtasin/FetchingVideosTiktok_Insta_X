@@ -90,12 +90,8 @@ ACTIVE_STATES = frozenset(set(JobState) - TERMINAL_STATES)
 # recovery must also mark jobs that were still waiting in the (non-persistent) queue.
 ALLOWED_TRANSITIONS: dict[JobState, frozenset[JobState]] = {
     JobState.QUEUED: frozenset({JobState.RUNNING, JobState.CANCELLED, JobState.INTERRUPTED}),
-    JobState.RUNNING: frozenset(
-        {JobState.PREPARING, JobState.FAILED, JobState.CANCELLED, JobState.INTERRUPTED}
-    ),
-    JobState.PREPARING: frozenset(
-        {JobState.UPLOADING, JobState.FAILED, JobState.CANCELLED, JobState.INTERRUPTED}
-    ),
+    JobState.RUNNING: frozenset({JobState.PREPARING, JobState.FAILED, JobState.CANCELLED, JobState.INTERRUPTED}),
+    JobState.PREPARING: frozenset({JobState.UPLOADING, JobState.FAILED, JobState.CANCELLED, JobState.INTERRUPTED}),
     JobState.UPLOADING: frozenset(
         {
             JobState.COMPLETED,

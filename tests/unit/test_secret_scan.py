@@ -110,8 +110,15 @@ def test_the_actual_repository_is_clean():
 
 @pytest.mark.skipif(shutil.which("git") is None or not (REPO / ".git").exists(), reason="needs a git checkout")
 def test_gitignore_actually_ignores_secret_locations():
-    for path in (".env", "secrets/instagram_cookies.txt", "data/bot.sqlite3", "tmp/jobs/x/clip.mp4",
-                 "tests/live/corpus.txt", "downloads/a.jpg", "cookies.txt"):
+    for path in (
+        ".env",
+        "secrets/instagram_cookies.txt",
+        "data/bot.sqlite3",
+        "tmp/jobs/x/clip.mp4",
+        "tests/live/corpus.txt",
+        "downloads/a.jpg",
+        "cookies.txt",
+    ):
         r = subprocess.run(["git", "-C", str(REPO), "check-ignore", "-q", path], timeout=30)
         assert r.returncode == 0, f"{path} is not git-ignored"
     # ...but the templates must stay trackable (a too-broad `corpus.*.txt` rule once ignored the example)

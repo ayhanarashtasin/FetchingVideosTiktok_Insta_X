@@ -68,8 +68,10 @@ SETTINGS_SAVED = "Saved."
 
 
 def settings_text(mode: DeliveryMode) -> str:
-    current = "Media (viewable in chat; photos may be compressed)" if mode is DeliveryMode.MEDIA else (
-        "Original files (sent as files, nothing is compressed)"
+    current = (
+        "Media (viewable in chat; photos may be compressed)"
+        if mode is DeliveryMode.MEDIA
+        else ("Original files (sent as files, nothing is compressed)")
     )
     return f"Delivery mode for new links:\n{current}\n\nChoose:"
 
@@ -163,8 +165,10 @@ def final_text(r: FinalReport) -> str | None:
     if s is JobState.COMPLETED:
         return None
     if s is JobState.UNVERIFIED:
-        return (f"Delivered {r.delivered} item{'s' if r.delivered != 1 else ''}. "
-                f"I could not verify whether the source contains additional media.\n{link}")
+        return (
+            f"Delivered {r.delivered} item{'s' if r.delivered != 1 else ''}. "
+            f"I could not verify whether the source contains additional media.\n{link}"
+        )
     if s is JobState.PARTIAL:
         if r.expected is not None:
             head = f"Delivered {r.delivered} of {r.expected} items."
@@ -184,8 +188,10 @@ def final_text(r: FinalReport) -> str | None:
     if s is JobState.DELIVERY_UNKNOWN:
         n = len(r.unknown_positions)
         confirmed = f" {r.delivered} item{'s' if r.delivered != 1 else ''} arrived for certain." if r.delivered else ""
-        return (f"Sending was interrupted and I can't tell whether {n} item{'s' if n != 1 else ''} arrived. "
-                f"I did not resend them.{confirmed} Check this chat, then tap Retry if something is missing.\n{link}")
+        return (
+            f"Sending was interrupted and I can't tell whether {n} item{'s' if n != 1 else ''} arrived. "
+            f"I did not resend them.{confirmed} Check this chat, then tap Retry if something is missing.\n{link}"
+        )
     if s is JobState.CANCELLED:
         tail = f" {r.delivered} item{'s' if r.delivered != 1 else ''} had already been sent." if r.delivered else ""
         return f"Cancelled.{tail}"

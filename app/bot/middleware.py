@@ -40,11 +40,13 @@ class ErrorBoundaryMiddleware(BaseMiddleware):
             await self._reply(bot, event, messages.error_text(err))
             log_event(log, logging.INFO, "request rejected", code=err.code.value, reason=err.reason)
         except TelegramAPIError as exc:
-            log_event(log, logging.WARNING, "telegram api error in handler", error_type=type(exc).__name__,
-                      error=redact(exc))
+            log_event(
+                log, logging.WARNING, "telegram api error in handler", error_type=type(exc).__name__, error=redact(exc)
+            )
         except Exception as exc:
-            log_event(log, logging.ERROR, "unhandled error in handler", error_type=type(exc).__name__,
-                      error=redact(exc))
+            log_event(
+                log, logging.ERROR, "unhandled error in handler", error_type=type(exc).__name__, error=redact(exc)
+            )
             await self._reply(bot, event, messages.INTERNAL_ERROR)
         return None
 

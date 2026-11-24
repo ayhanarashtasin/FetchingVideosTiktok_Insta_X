@@ -42,8 +42,9 @@ class App:
     async def feed(self, update: Update) -> Any:
         return await self.dp.feed_update(self.bot, update)
 
-    async def drain(self, timeout: float = 5.0) -> None:  # noqa: ASYNC109
+    async def drain(self, timeout: float = 5.0) -> None:
         """Wait until no job is queued or running."""
+
         async def idle() -> None:
             while self.queue.waiting_count or self.queue.running_count:  # noqa: ASYNC110 - polling a test counter
                 await asyncio.sleep(0.01)
@@ -69,7 +70,9 @@ async def build_app(
     db.migrate()
     workspaces = WorkspaceManager(settings.work_dir, orphan_ttl=timedelta(minutes=30))
     queue = JobQueue(
-        db, max_queue_size=settings.max_queue_size, max_active_per_user=settings.max_active_jobs_per_user,
+        db,
+        max_queue_size=settings.max_queue_size,
+        max_active_per_user=settings.max_active_jobs_per_user,
         max_concurrent=settings.max_concurrent_jobs,
     )
     bot, session = make_bot()
@@ -81,8 +84,15 @@ async def build_app(
     async def fake_sleep(s: float) -> None:
         sleeps.append(s)
 
-    runner = JobRunner(settings=settings, db=db, extractor=extractor, deliverer=deliverer, notifier=notifier,
-                       workspaces=workspaces, sleep=fake_sleep)
+    runner = JobRunner(
+        settings=settings,
+        db=db,
+        extractor=extractor,
+        deliverer=deliverer,
+        notifier=notifier,
+        workspaces=workspaces,
+        sleep=fake_sleep,
+    )
     ctx = AppContext(settings=settings, db=db, queue=queue, notifier=notifier)
     dp = build_dispatcher(settings, ctx)
     if start_workers:

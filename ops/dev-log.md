@@ -114,3 +114,42 @@ send outcomes: each made 2-8 tests fail; originals restored (`41 passed`).
 
 Not done: running the real bot against Telegram (needs a token, T00.4); `app.main` cannot start yet because
 the real extractor backend (Phase 3) and Telegram sender (Phase 4) are not written.
+
+---
+
+## Phase 3 - platform extraction adapters (2026-11-24)
+
+Built: `app/services/subprocess_runner.py`, `app/extractors/{base,classify,ytdlp_runner,gallerydl_runner,resolver,
+tiktok,instagram,twitter,router,finalize,local,factory}.py`, `app/media/{probe,quality}.py`, synthetic fixtures
+(`tests/fixtures/make_fixtures.py`, 27 files) and `tests/fake_tools.py`.
+
+| Check | Command | Result |
+| --- | --- | --- |
+| Whole suite, Windows | `uv run pytest -q` | PASS - 684 passed, 6 skipped |
+| **Whole suite, Linux** | `docker build --target test -t tmd-test . && docker run --rm tmd-test` | **PASS - 687 passed, 3 skipped** (1 needs ffmpeg >= 6 `-display_rotation`, covered on Windows' ffmpeg 9; 2 need a `.git` dir). POSIX-only tests (killpg tree kill, rlimits, symlinks) ran. |
+| Real yt-dlp / gallery-dl binaries (loopback only) | `tests/integration/test_tool_runners_real.py` | PASS - flags accepted by the pinned versions, hostile config files inert, option-looking URLs inert, generic extractor refused, size limit enforced |
+| Process runner with real processes | `tests/unit/test_subprocess_runner.py` | PASS - grandchild processes die on timeout AND on cancellation; output bounded; env isolated; byte/disk budget kills |
+| Lint | `uv run ruff check app scripts tests` | PASS |
+
+### Bugs / design flaws found by the tests and fixed
+* Error classification: `HTTP Error 503: Service Unavailable` matched the "unavailable => not found" rule; "redirect to
+  login page" was not a login wall; bare `404`/`410`/`429` matched inside ports and error numbers.
+* `yt-dlp --print` implies `--quiet`, which hid the "File is larger than max-filesize" message -> switched to
+  `--print-to-file` (path file written under yt-dlp's `home` path).
+* When gallery-dl produced NO files for a single-video post the yt-dlp fallback was skipped (it only handled partial
+  results). Fixed by one shared `fetch_via_gallerydl` used by Instagram and X.
+* `discover()` needed the job workspace (tool HOME/cwd); the port now passes it.
+* **Tooling lesson:** regex word boundaries written through a shell heredoc were silently turned into backspace
+  characters in `classify.py`; caught by failing tests, repaired, and every source file was scanned for stray control
+  characters (none). Rule: code containing backslashes goes through the editor tools, never a heredoc.
+* **Test-quality lesson:** a few early contract tests contained tautological placeholder assertions
+  (`... if False else True`). They were found in review, replaced with real assertions, and a grep for the pattern now
+  returns nothing.
+
+### What Phase 3 does and does NOT establish
+* ESTABLISHED (offline): given the extractor output shapes read from the pinned sources, the adapters return ordered,
+  identity-checked, in-scope items; audio/covers/foreign media are excluded; a skipped item is an explicit omission;
+  Stories are fetched only after account visibility, exact id and audience checks; no fallback happens after
+  access/auth/rate/challenge errors; short links are resolved with per-hop validation and pinned DNS.
+* NOT ESTABLISHED: that any platform currently serves those shapes. See `ops/feasibility.md` section 5 for the nine
+  assumptions (A1-A9) a live run must confirm. `tests/live/test_live_corpus.py` and the probe are ready for that.

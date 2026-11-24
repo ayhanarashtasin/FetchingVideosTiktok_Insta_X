@@ -1,0 +1,38 @@
+{
+ "_synthetic": true,
+ "duration": 12.5,
+ "extractor_key": "TikTok",
+ "formats": [
+  {
+   "acodec": "aac",
+   "ext": "mp4",
+   "format_id": "download",
+   "format_note": "Download video, watermarked",
+   "height": 1024,
+   "tbr": 700.0,
+   "vcodec": "h264",
+   "width": 576
+  },
+  {
+   "acodec": "aac",
+   "ext": "mp4",
+   "format_id": "h264_540p_1",
+   "height": 1024,
+   "tbr": 900.0,
+   "vcodec": "h264",
+   "width": 576
+  },
+  {
+   "acodec": "aac",
+   "ext": "mp4",
+   "format_id": "bytevc1_720p_1",
+   "height": 1280,
+   "tbr": 1100.0,
+   "vcodec": "hevc",
+   "width": 720
+  }
+ ],
+ "height": 1280,
+ "id": "7300000000000000000",
+ "width": 720
+}

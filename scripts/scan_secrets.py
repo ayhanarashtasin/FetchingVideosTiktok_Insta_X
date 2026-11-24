@@ -46,8 +46,24 @@ RULES: tuple[tuple[str, re.Pattern[str]], ...] = (
 
 # --- forbidden paths (never commit, whatever the content) -----------------------------------
 MEDIA_EXTENSIONS = frozenset(
-    {".mp4", ".m4v", ".mov", ".webm", ".mkv", ".avi", ".mp3", ".m4a", ".opus",
-     ".jpg", ".jpeg", ".png", ".webp", ".gif", ".heic", ".avif"}
+    {
+        ".mp4",
+        ".m4v",
+        ".mov",
+        ".webm",
+        ".mkv",
+        ".avi",
+        ".mp3",
+        ".m4a",
+        ".opus",
+        ".jpg",
+        ".jpeg",
+        ".png",
+        ".webp",
+        ".gif",
+        ".heic",
+        ".avif",
+    }
 )
 FORBIDDEN_SUFFIXES = frozenset({".sqlite", ".sqlite3", ".db", ".db-wal", ".db-shm", ".session", ".pem", ".key", ".p12"})
 
@@ -112,9 +128,7 @@ def scan_file(root: Path, rel: str) -> list[Finding]:
 
 
 def _git(root: Path, *args: str) -> list[str]:
-    out = subprocess.run(
-        ["git", "-C", str(root), *args], capture_output=True, check=True, timeout=60
-    ).stdout
+    out = subprocess.run(["git", "-C", str(root), *args], capture_output=True, check=True, timeout=60).stdout
     return [p for p in out.decode("utf-8", errors="replace").split("\0") if p]
 
 

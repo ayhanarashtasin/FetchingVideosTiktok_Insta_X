@@ -1,0 +1,44 @@
+[
+ [
+  2,
+  {
+   "_synthetic": true,
+   "count": 1,
+   "post_id": "99",
+   "post_shortcode": "story99",
+   "post_url": "https://www.instagram.com/stories/storyuser/",
+   "type": "story",
+   "user": {
+    "id": "99",
+    "username": "storyuser"
+   },
+   "username": "storyuser"
+  }
+ ],
+ [
+  3,
+  "https://scontent.example.invalid/story1.jpg",
+  {
+   "_synthetic": true,
+   "audience": "besties",
+   "count": 1,
+   "display_url": "https://scontent.example.invalid/story1.jpg",
+   "extension": "jpg",
+   "height": 1920,
+   "media_id": "3000000000000000001",
+   "num": 1,
+   "post_id": "99",
+   "post_shortcode": "story99",
+   "post_url": "https://www.instagram.com/stories/storyuser/",
+   "shortcode": "st1",
+   "type": "story",
+   "user": {
+    "id": "99",
+    "username": "storyuser"
+   },
+   "username": "storyuser",
+   "video_url": null,
+   "width": 1080
+  }
+ ]
+]

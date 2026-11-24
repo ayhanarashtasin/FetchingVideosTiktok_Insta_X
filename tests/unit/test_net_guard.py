@@ -120,7 +120,9 @@ async def test_one_private_record_poisons_the_answer():
     assert exc.value.reason == "unsafe_destination"
 
 
-@pytest.mark.parametrize("host", ["localhost", "metadata.google.internal", "foo.localhost", "db.internal", "printer.local"])
+@pytest.mark.parametrize(
+    "host", ["localhost", "metadata.google.internal", "foo.localhost", "db.internal", "printer.local"]
+)
 async def test_blocked_hostnames(host):
     with pytest.raises(BotError):
         await resolve_public(host, resolver=fake({host: ["8.8.8.8"]}))

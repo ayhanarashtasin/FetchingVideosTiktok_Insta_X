@@ -42,13 +42,26 @@ def make_job(
     jid = job_id or uuid.uuid4().hex
     chat = owner_id if chat_id is None else chat_id
     job = db.new_job_record(
-        job_id=jid, owner_id=owner_id, chat_id=chat, origin_message_id=message_id,
-        original_url=validated.original_url, platform=validated.platform, delivery_mode=mode,
-        ttl_hours=ttl_hours, request_key=request_key, parent_job_id=parent_job_id,
+        job_id=jid,
+        owner_id=owner_id,
+        chat_id=chat,
+        origin_message_id=message_id,
+        original_url=validated.original_url,
+        platform=validated.platform,
+        delivery_mode=mode,
+        ttl_hours=ttl_hours,
+        request_key=request_key,
+        parent_job_id=parent_job_id,
     )
     request = ExtractionRequest(
-        job_id=uuid.UUID(jid), owner_id=owner_id, chat_id=chat, origin_message_id=message_id,
-        original_url=validated.original_url, extraction_url=validated.extraction_url,
-        platform=validated.platform, delivery_mode=mode, post_hint=validated.post_hint,
+        job_id=uuid.UUID(jid),
+        owner_id=owner_id,
+        chat_id=chat,
+        origin_message_id=message_id,
+        original_url=validated.original_url,
+        extraction_url=validated.extraction_url,
+        platform=validated.platform,
+        delivery_mode=mode,
+        post_hint=validated.post_hint,
     )
     return job, request, validated

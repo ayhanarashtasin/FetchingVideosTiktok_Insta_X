@@ -187,9 +187,5 @@ def test_env_example_loads_and_is_not_startable_as_is():
 def test_env_example_documents_every_setting():
     text = (REPO / ".env.example").read_text(encoding="utf-8").lower()
     skip = {"bot_token_file", "worker_secret_file"}  # documented in comments as alternatives
-    missing = [
-        name
-        for name in Settings.model_fields
-        if name not in skip and name not in text
-    ]
+    missing = [name for name in Settings.model_fields if name not in skip and name not in text]
     assert not missing, f".env.example is missing: {missing}"

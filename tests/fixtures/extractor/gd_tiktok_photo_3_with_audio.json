@@ -1,0 +1,163 @@
+[
+ [
+  2,
+  {
+   "_synthetic": true,
+   "desc": "synthetic photo post",
+   "id": "7300000000000000000",
+   "imagePost": {
+    "images": [
+     {
+      "imageHeight": 1920,
+      "imageWidth": 1080
+     },
+     {
+      "imageHeight": 1920,
+      "imageWidth": 1080
+     },
+     {
+      "imageHeight": 1920,
+      "imageWidth": 1080
+     }
+    ]
+   },
+   "post_type": "image",
+   "user": "someuser"
+  }
+ ],
+ [
+  3,
+  "https://p16.example.invalid/img1~tplv.jpeg",
+  {
+   "_synthetic": true,
+   "desc": "synthetic photo post",
+   "extension": "jpeg",
+   "file_id": "fid1",
+   "height": 1920,
+   "id": "7300000000000000000",
+   "imagePost": {
+    "images": [
+     {
+      "imageHeight": 1920,
+      "imageWidth": 1080
+     },
+     {
+      "imageHeight": 1920,
+      "imageWidth": 1080
+     },
+     {
+      "imageHeight": 1920,
+      "imageWidth": 1080
+     }
+    ]
+   },
+   "num": 1,
+   "post_type": "image",
+   "title": "synthetic photo post",
+   "type": "image",
+   "user": "someuser",
+   "width": 1080
+  }
+ ],
+ [
+  3,
+  "https://p16.example.invalid/img2~tplv.jpeg",
+  {
+   "_synthetic": true,
+   "desc": "synthetic photo post",
+   "extension": "jpeg",
+   "file_id": "fid2",
+   "height": 1920,
+   "id": "7300000000000000000",
+   "imagePost": {
+    "images": [
+     {
+      "imageHeight": 1920,
+      "imageWidth": 1080
+     },
+     {
+      "imageHeight": 1920,
+      "imageWidth": 1080
+     },
+     {
+      "imageHeight": 1920,
+      "imageWidth": 1080
+     }
+    ]
+   },
+   "num": 2,
+   "post_type": "image",
+   "title": "synthetic photo post",
+   "type": "image",
+   "user": "someuser",
+   "width": 1080
+  }
+ ],
+ [
+  3,
+  "https://p16.example.invalid/img3~tplv.jpeg",
+  {
+   "_synthetic": true,
+   "desc": "synthetic photo post",
+   "extension": "jpeg",
+   "file_id": "fid3",
+   "height": 1920,
+   "id": "7300000000000000000",
+   "imagePost": {
+    "images": [
+     {
+      "imageHeight": 1920,
+      "imageWidth": 1080
+     },
+     {
+      "imageHeight": 1920,
+      "imageWidth": 1080
+     },
+     {
+      "imageHeight": 1920,
+      "imageWidth": 1080
+     }
+    ]
+   },
+   "num": 3,
+   "post_type": "image",
+   "title": "synthetic photo post",
+   "type": "image",
+   "user": "someuser",
+   "width": 1080
+  }
+ ],
+ [
+  3,
+  "https://sf16.example.invalid/music.mp3",
+  {
+   "_synthetic": true,
+   "desc": "synthetic photo post",
+   "extension": "mp3",
+   "file_id": "music1",
+   "height": 0,
+   "id": "7300000000000000000",
+   "imagePost": {
+    "images": [
+     {
+      "imageHeight": 1920,
+      "imageWidth": 1080
+     },
+     {
+      "imageHeight": 1920,
+      "imageWidth": 1080
+     },
+     {
+      "imageHeight": 1920,
+      "imageWidth": 1080
+     }
+    ]
+   },
+   "num": 0,
+   "post_type": "image",
+   "type": "audio",
+   "user": "someuser",
+   "width": 0
+  }
+ ]
+]

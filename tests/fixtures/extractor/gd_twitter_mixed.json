@@ -1,0 +1,77 @@
+[
+ [
+  2,
+  {
+   "_synthetic": true,
+   "count": 3,
+   "quote_id": 0,
+   "retweet_id": 0,
+   "tweet_id": 1700000000000000000,
+   "user": {
+    "name": "someuser"
+   }
+  }
+ ],
+ [
+  3,
+  "https://pbs.example.invalid/1.jpg",
+  {
+   "_synthetic": true,
+   "count": 3,
+   "extension": "jpg",
+   "height": 800,
+   "num": 1,
+   "quote_id": 0,
+   "retweet_id": 0,
+   "source_id": 0,
+   "tweet_id": 1700000000000000000,
+   "type": "photo",
+   "user": {
+    "name": "someuser"
+   },
+   "width": 1200
+  }
+ ],
+ [
+  3,
+  "https://pbs.example.invalid/2.mp4",
+  {
+   "_synthetic": true,
+   "bitrate": 2176000,
+   "count": 3,
+   "duration": 6.0,
+   "extension": "mp4",
+   "height": 800,
+   "num": 2,
+   "quote_id": 0,
+   "retweet_id": 0,
+   "source_id": 0,
+   "tweet_id": 1700000000000000000,
+   "type": "video",
+   "user": {
+    "name": "someuser"
+   },
+   "width": 1200
+  }
+ ],
+ [
+  3,
+  "https://pbs.example.invalid/3.jpg",
+  {
+   "_synthetic": true,
+   "count": 3,
+   "extension": "jpg",
+   "height": 800,
+   "num": 3,
+   "quote_id": 0,
+   "retweet_id": 0,
+   "source_id": 0,
+   "tweet_id": 1700000000000000000,
+   "type": "photo",
+   "user": {
+    "name": "someuser"
+   },
+   "width": 1200
+  }
+ ]
+]

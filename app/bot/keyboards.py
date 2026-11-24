@@ -31,7 +31,7 @@ def parse_job_callback(data: str | None, prefix: str) -> str | None:
     """Return the job id from `prefix<32 hex>` or None if the payload is malformed."""
     if not data or not data.startswith(prefix):
         return None
-    job_id = data[len(prefix):]
+    job_id = data[len(prefix) :]
     return job_id if _JOB_ID.fullmatch(job_id) else None
 
 
@@ -54,7 +54,10 @@ def settings_keyboard(current: DeliveryMode) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text=label(DeliveryMode.MEDIA, "Media"), callback_data=SETTINGS_PREFIX + "media")],
-            [InlineKeyboardButton(text=label(DeliveryMode.ORIGINAL, "Original files"),
-                                  callback_data=SETTINGS_PREFIX + "original")],
+            [
+                InlineKeyboardButton(
+                    text=label(DeliveryMode.ORIGINAL, "Original files"), callback_data=SETTINGS_PREFIX + "original"
+                )
+            ],
         ]
     )

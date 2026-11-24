@@ -17,9 +17,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-_HEADER = re.compile(
-    r"(?i)\b(cookie|set-cookie|authorization|proxy-authorization|x-worker-secret)\b\s*[:=]\s*[^\r\n]+"
-)
+_HEADER = re.compile(r"(?i)\b(cookie|set-cookie|authorization|proxy-authorization|x-worker-secret)\b\s*[:=]\s*[^\r\n]+")
 _URL = re.compile(r"(?i)\b(?:https?|ftp|file|socks5?)://[^\s<>\"'`]+")
 _TOKEN = re.compile(r"\b\d{8,10}:[A-Za-z0-9_-]{30,}\b")
 _BEARER = re.compile(r"(?i)\b(bearer|basic)\s+[A-Za-z0-9._~+/=-]{8,}")

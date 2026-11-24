@@ -52,7 +52,7 @@ async def test_happy_path_completes_cleans_up_and_removes_the_status_message(app
     job = await run_one(app)
     assert job.state is JobState.COMPLETED and job.delivered_count == 2 and job.expected_count == 2
     assert app.notifier.status_texts() == [messages.FETCHING, messages.PREPARING, messages.SENDING]
-    (_, report), = app.notifier.finals
+    ((_, report),) = app.notifier.finals
     assert report.state is JobState.COMPLETED and messages.final_text(report) is None  # status message removed
     assert not (app.settings.work_dir / job.id).exists(), "workspace must be gone after completion"
     assert app.deliverer.files_seen_at_delivery == [True, True]  # files existed when the sender ran
@@ -243,18 +243,22 @@ async def test_unproven_source_completeness_is_unverified(tmp_path):
     try:
         job = await run_one(a)
         assert job.state is JobState.UNVERIFIED and job.delivered_count == 3
-        assert "could not verify whether the source contains additional media" in messages.final_text(a.notifier.finals[0][1])
+        assert "could not verify whether the source contains additional media" in messages.final_text(
+            a.notifier.finals[0][1]
+        )
     finally:
         await a.shutdown()
 
 
 async def test_ambiguous_send_is_delivery_unknown_and_offers_retry_but_never_auto_replays(tmp_path):
-    deliverer = FakeDeliverer(outcome=DeliveryOutcome(confirmed_positions=[0], unknown_positions=[1], completeness="partial"))
+    deliverer = FakeDeliverer(
+        outcome=DeliveryOutcome(confirmed_positions=[0], unknown_positions=[1], completeness="partial")
+    )
     a = await build_app(tmp_path, deliverer=deliverer)
     try:
         job = await run_one(a)
         assert job.state is JobState.DELIVERY_UNKNOWN
-        (_, report), = a.notifier.finals
+        ((_, report),) = a.notifier.finals
         assert report.retry_offered and "can't tell whether 1 item arrived" in messages.final_text(report)
         assert len(deliverer.calls) == 1, "an uncertain delivery must never be replayed automatically"
     finally:
@@ -262,7 +266,9 @@ async def test_ambiguous_send_is_delivery_unknown_and_offers_retry_but_never_aut
 
 
 async def test_total_delivery_failure_is_failed_with_the_real_reason(tmp_path):
-    outcome = DeliveryOutcome(failed_positions=[0, 1], failure_codes={0: ErrorCode.FILE_TOO_LARGE, 1: ErrorCode.FILE_TOO_LARGE})
+    outcome = DeliveryOutcome(
+        failed_positions=[0, 1], failure_codes={0: ErrorCode.FILE_TOO_LARGE, 1: ErrorCode.FILE_TOO_LARGE}
+    )
     a = await build_app(tmp_path, deliverer=FakeDeliverer(outcome=outcome))
     try:
         job = await run_one(a)
@@ -275,7 +281,9 @@ async def test_total_delivery_failure_is_failed_with_the_real_reason(tmp_path):
 
 
 async def test_partial_delivery_failure_reports_which_items(tmp_path):
-    outcome = DeliveryOutcome(confirmed_positions=[0], failed_positions=[1], failure_codes={1: ErrorCode.FILE_TOO_LARGE})
+    outcome = DeliveryOutcome(
+        confirmed_positions=[0], failed_positions=[1], failure_codes={1: ErrorCode.FILE_TOO_LARGE}
+    )
     a = await build_app(tmp_path, deliverer=FakeDeliverer(outcome=outcome))
     try:
         job = await run_one(a)
@@ -306,11 +314,16 @@ def test_final_state_is_never_optimistic(tmp_path, delivered, failed, unknown, o
 
     assets = [asset_in(tmp_path, i) for i in range(2)]
     result = ExtractionResult(
-        assets=assets, expected_count=2, completeness=completeness,
+        assets=assets,
+        expected_count=2,
+        completeness=completeness,
         omissions=[ItemFailure(position=9, code=ErrorCode.EXTRACTOR_CHANGED, message="m")] * omissions,
     )
-    outcome = DeliveryOutcome(confirmed_positions=list(range(delivered)), failed_positions=list(range(delivered, delivered + failed)),
-                              unknown_positions=list(range(delivered, delivered + unknown)))
+    outcome = DeliveryOutcome(
+        confirmed_positions=list(range(delivered)),
+        failed_positions=list(range(delivered, delivered + failed)),
+        unknown_positions=list(range(delivered, delivered + unknown)),
+    )
     assert decide_final_state(result, outcome) is expected
 
 
@@ -363,7 +376,7 @@ async def test_shutdown_interrupts_the_job_cleans_up_and_offers_retry(tmp_path):
     job = job_of(a)
     assert job.state is JobState.INTERRUPTED and job.error_code == "INTERRUPTED"
     assert not ws.exists()
-    (_, report), = a.notifier.finals
+    ((_, report),) = a.notifier.finals
     assert report.state is JobState.INTERRUPTED and report.retry_offered
     a.db.close()
 

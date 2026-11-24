@@ -131,8 +131,14 @@ def licence_of(dist: str) -> str:
 
 def sandbox_env(home: Path) -> dict[str, str]:
     env = {k: v for k, v in os.environ.items() if k.upper() in {"PATH", "SYSTEMROOT", "TEMP", "TMP", "PATHEXT", "LANG"}}
-    env.update(HOME=str(home), USERPROFILE=str(home), APPDATA=str(home), XDG_CONFIG_HOME=str(home),
-               PYTHONUTF8="1", PYTHONIOENCODING="utf-8")
+    env.update(
+        HOME=str(home),
+        USERPROFILE=str(home),
+        APPDATA=str(home),
+        XDG_CONFIG_HOME=str(home),
+        PYTHONUTF8="1",
+        PYTHONIOENCODING="utf-8",
+    )
     return env
 
 
@@ -142,16 +148,27 @@ def run(cmd: list[str], env: dict[str, str], timeout: int) -> dict[str, Any]:
         p = subprocess.run(cmd, capture_output=True, env=env, timeout=timeout, check=False)
         out = p.stdout[:MAX_CAPTURE].decode("utf-8", "replace")
         err = p.stderr[:MAX_CAPTURE].decode("utf-8", "replace")
-        return {"rc": p.returncode, "out": out, "err": err, "timeout": False,
-                "seconds": round(time.monotonic() - started, 1)}
+        return {
+            "rc": p.returncode,
+            "out": out,
+            "err": err,
+            "timeout": False,
+            "seconds": round(time.monotonic() - started, 1),
+        }
     except subprocess.TimeoutExpired:
         return {"rc": None, "out": "", "err": "", "timeout": True, "seconds": float(timeout)}
 
 
 BLOCKER_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("RATE_LIMITED", re.compile(r"429|rate.?limit|too many requests|challenge|captcha|verify you are human", re.I)),
-    ("AUTH_REQUIRED", re.compile(r"log.?in|login required|credentials|authentication|sign in|AuthRequired|cookies", re.I)),
-    ("ACCESS_RESTRICTED", re.compile(r"private|protected|not authorized|forbidden|403|unauthori[sz]ed|restricted", re.I)),
+    (
+        "AUTH_REQUIRED",
+        re.compile(r"log.?in|login required|credentials|authentication|sign in|AuthRequired|cookies", re.I),
+    ),
+    (
+        "ACCESS_RESTRICTED",
+        re.compile(r"private|protected|not authorized|forbidden|403|unauthori[sz]ed|restricted", re.I),
+    ),
     ("NOT_FOUND_OR_EXPIRED", re.compile(r"404|not found|NotFoundError|unavailable|expired|removed|deleted", re.I)),
     ("UNSUPPORTED", re.compile(r"unsupported url|no suitable extractor|NoExtractor", re.I)),
 )
@@ -186,8 +203,15 @@ def parse_gallerydl_dump(stdout: str) -> dict[str, Any]:
             meta = msg[2]
             ext = str(meta.get("extension") or "").lower()
             kind = "photo" if ext in PHOTO_EXT else "video" if ext in VIDEO_EXT else f"other:{ext or '?'}"
-            items.append({"num": meta.get("num"), "kind": kind, "width": meta.get("width"),
-                          "height": meta.get("height"), "type": meta.get("type")})
+            items.append(
+                {
+                    "num": meta.get("num"),
+                    "kind": kind,
+                    "width": meta.get("width"),
+                    "height": meta.get("height"),
+                    "type": meta.get("type"),
+                }
+            )
         elif msg[0] == -1 and isinstance(msg[-1], dict):
             errors.append({"error": str(msg[-1].get("error")), "message": str(msg[-1].get("message"))[:200]})
     return {"parsed": True, "items": items, "errors": errors, "declared_count": declared}
@@ -208,17 +232,25 @@ def parse_ytdlp_info(stdout: str) -> dict[str, Any]:
             continue
         formats = [f for f in (e.get("formats") or []) if isinstance(f, dict)]
         vids = [f for f in formats if f.get("vcodec") not in (None, "none")]
-        best = max(vids, key=lambda f: ((f.get("height") or 0) * (f.get("width") or 0), f.get("tbr") or 0), default=None)
-        has_audio = any(f.get("acodec") not in (None, "none") for f in formats) or e.get("acodec") not in (None, "none", "")
-        out.append({
-            "extractor": e.get("extractor_key"),
-            "format_count": len(formats),
-            "best_width": (best or e).get("width"),
-            "best_height": (best or e).get("height"),
-            "best_vcodec": (best or {}).get("vcodec"),
-            "has_audio": bool(has_audio),
-            "duration": e.get("duration"),
-        })
+        best = max(
+            vids, key=lambda f: ((f.get("height") or 0) * (f.get("width") or 0), f.get("tbr") or 0), default=None
+        )
+        has_audio = any(f.get("acodec") not in (None, "none") for f in formats) or e.get("acodec") not in (
+            None,
+            "none",
+            "",
+        )
+        out.append(
+            {
+                "extractor": e.get("extractor_key"),
+                "format_count": len(formats),
+                "best_width": (best or e).get("width"),
+                "best_height": (best or e).get("height"),
+                "best_vcodec": (best or {}).get("vcodec"),
+                "has_audio": bool(has_audio),
+                "duration": e.get("duration"),
+            }
+        )
     return {"parsed": True, "entries": out}
 
 
@@ -227,9 +259,24 @@ def ffprobe_summary(path: Path) -> dict[str, Any]:
     if not ffprobe:
         return {"error": "ffprobe not found"}
     # NB: `-nostdin` is an ffmpeg-only option and makes ffprobe abort; stdin is closed instead.
-    p = subprocess.run([ffprobe, "-v", "error", "-protocol_whitelist", "file", "-print_format", "json",
-                        "-show_format", "-show_streams", str(path)], capture_output=True, text=True, timeout=60,
-                       stdin=subprocess.DEVNULL)
+    p = subprocess.run(
+        [
+            ffprobe,
+            "-v",
+            "error",
+            "-protocol_whitelist",
+            "file",
+            "-print_format",
+            "json",
+            "-show_format",
+            "-show_streams",
+            str(path),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        stdin=subprocess.DEVNULL,
+    )
     try:
         data = json.loads(p.stdout)
     except ValueError:
@@ -239,11 +286,15 @@ def ffprobe_summary(path: Path) -> dict[str, Any]:
     a = next((s for s in streams if s.get("codec_type") == "audio"), None)
     fmt = data.get("format", {})
     return {
-        "format": fmt.get("format_name"), "size": int(fmt.get("size") or 0),
-        "width": (v or {}).get("width"), "height": (v or {}).get("height"),
-        "vcodec": (v or {}).get("codec_name"), "acodec": (a or {}).get("codec_name"),
+        "format": fmt.get("format_name"),
+        "size": int(fmt.get("size") or 0),
+        "width": (v or {}).get("width"),
+        "height": (v or {}).get("height"),
+        "vcodec": (v or {}).get("codec_name"),
+        "acodec": (a or {}).get("codec_name"),
         "duration": float(fmt["duration"]) if fmt.get("duration") else None,
-        "has_audio": a is not None, "has_video": v is not None,
+        "has_audio": a is not None,
+        "has_video": v is not None,
     }
 
 
@@ -255,8 +306,11 @@ def audio_from_files(files: list[dict[str, Any]]) -> bool | None:
 
     ffprobe reports a JPEG as a one-frame 'video' stream, so image containers are excluded.
     """
-    videos = [f for f in files if f.get("has_video") and f.get("format") not in IMAGE_FORMATS
-              and "image2" not in str(f.get("format"))]
+    videos = [
+        f
+        for f in files
+        if f.get("has_video") and f.get("format") not in IMAGE_FORMATS and "image2" not in str(f.get("format"))
+    ]
     if not videos:
         return None
     return all(bool(f.get("has_audio")) for f in videos)
@@ -328,8 +382,11 @@ def offline_results() -> dict[str, Any]:
         "python": sys.version.split()[0],
         "tools": {
             "yt-dlp": {"version": tool_version("yt-dlp"), "license": licence_of("yt-dlp"), "invocation": "subprocess"},
-            "gallery-dl": {"version": tool_version("gallery-dl"), "license": licence_of("gallery-dl"),
-                           "invocation": "subprocess ONLY (GPL-2.0-only: never imported by project code)"},
+            "gallery-dl": {
+                "version": tool_version("gallery-dl"),
+                "license": licence_of("gallery-dl"),
+                "invocation": "subprocess ONLY (GPL-2.0-only: never imported by project code)",
+            },
             "ffmpeg": {"version": binary_version("ffmpeg")},
             "ffprobe": {"version": binary_version("ffprobe")},
             "aiogram": {"version": tool_version("aiogram"), "license": licence_of("aiogram")},
@@ -353,23 +410,35 @@ def render_offline_md(off: dict[str, Any]) -> str:
     ]
     for name, t in off["tools"].items():
         lines.append(f"| {name} | {t['version']} | {t.get('license', '-')} | {t.get('invocation', 'library/binary')} |")
-    lines += ["", "### Which extractor claims each URL shape (pattern match only)", "",
-              "| URL shape (dummy IDs) | yt-dlp (non-generic) | gallery-dl | App URL validator |",
-              "| --- | --- | --- | --- |"]
+    lines += [
+        "",
+        "### Which extractor claims each URL shape (pattern match only)",
+        "",
+        "| URL shape (dummy IDs) | yt-dlp (non-generic) | gallery-dl | App URL validator |",
+        "| --- | --- | --- | --- |",
+    ]
     for r in off["routing"]:
-        lines.append(f"| {r['case']} | {', '.join(r['ytdlp']) or '-'} | {r['gallerydl'] or '-'} | {r['app_validator']} |")
+        lines.append(
+            f"| {r['case']} | {', '.join(r['ytdlp']) or '-'} | {r['gallerydl'] or '-'} | {r['app_validator']} |"
+        )
     miss = off["missing_flags"]
-    lines += ["", "### CLI options the project depends on (checked against the installed `--help`)", "",
-              f"- yt-dlp: {'all present' if not miss['yt-dlp'] else 'MISSING ' + ', '.join(miss['yt-dlp'])}",
-              f"- gallery-dl: {'all present' if not miss['gallery-dl'] else 'MISSING ' + ', '.join(miss['gallery-dl'])}",
-              f"- yt-dlp extractor allowlist (`--use-extractors`): {', '.join(off['ytdlp_allowed_extractors'])}"]
+    lines += [
+        "",
+        "### CLI options the project depends on (checked against the installed `--help`)",
+        "",
+        f"- yt-dlp: {'all present' if not miss['yt-dlp'] else 'MISSING ' + ', '.join(miss['yt-dlp'])}",
+        f"- gallery-dl: {'all present' if not miss['gallery-dl'] else 'MISSING ' + ', '.join(miss['gallery-dl'])}",
+        f"- yt-dlp extractor allowlist (`--use-extractors`): {', '.join(off['ytdlp_allowed_extractors'])}",
+    ]
     return "\n".join(lines)
 
 
 # ----------------------------------------------------------------------------------------
 # live mode
 # ----------------------------------------------------------------------------------------
-def live_probe_one(entry: dict[str, Any], *, download: bool, cookies: Path | None, timeout: int, keep: bool) -> dict[str, Any]:
+def live_probe_one(
+    entry: dict[str, Any], *, download: bool, cookies: Path | None, timeout: int, keep: bool
+) -> dict[str, Any]:
     from gallery_dl import extractor as gd_extractor
     from yt_dlp.extractor import gen_extractor_classes
     from yt_dlp.extractor.generic import GenericIE
@@ -393,19 +462,75 @@ def live_probe_one(entry: dict[str, Any], *, download: bool, cookies: Path | Non
         # --- yt-dlp ---
         yt_ok = any(c.suitable(url) for c in gen_extractor_classes() if c is not GenericIE)
         if yt_ok:
-            r = run([sys.executable, "-m", "yt_dlp", "--ignore-config", "--no-playlist", "--no-cache-dir", "--no-warnings",
-                     "--use-extractors", ",".join(YTDLP_ALLOWED_EXTRACTORS), "--socket-timeout", "20", "--retries", "1",
-                     "--extractor-retries", "1", *cookie_args_yt, "-J", "--", url], env, timeout)
+            r = run(
+                [
+                    sys.executable,
+                    "-m",
+                    "yt_dlp",
+                    "--ignore-config",
+                    "--no-playlist",
+                    "--no-cache-dir",
+                    "--no-warnings",
+                    "--use-extractors",
+                    ",".join(YTDLP_ALLOWED_EXTRACTORS),
+                    "--socket-timeout",
+                    "20",
+                    "--retries",
+                    "1",
+                    "--extractor-retries",
+                    "1",
+                    *cookie_args_yt,
+                    "-J",
+                    "--",
+                    url,
+                ],
+                env,
+                timeout,
+            )
             summary = parse_ytdlp_info(r["out"]) if r["rc"] == 0 else {"parsed": False, "entries": []}
-            res = {"rc": r["rc"], "timeout": r["timeout"], "summary": summary,
-                   "blocker": None if r["rc"] == 0 else classify_blocker(r["err"]), "stderr_head": r["err"][:400]}
+            res = {
+                "rc": r["rc"],
+                "timeout": r["timeout"],
+                "summary": summary,
+                "blocker": None if r["rc"] == 0 else classify_blocker(r["err"]),
+                "stderr_head": r["err"][:400],
+            }
             if r["rc"] == 0 and download:
                 workdir.mkdir(parents=True, exist_ok=True)
-                d = run([sys.executable, "-m", "yt_dlp", "--ignore-config", "--no-playlist", "--no-cache-dir", "--no-warnings",
-                         "--use-extractors", ",".join(YTDLP_ALLOWED_EXTRACTORS), "--socket-timeout", "20", "--retries", "1",
-                         "--extractor-retries", "1", *cookie_args_yt, "-P", f"home:{workdir}", "-o", "yt_%(id)s_%(playlist_index|1)s.%(ext)s",
-                         "--restrict-filenames", "--no-mtime", "--no-part", "--no-progress", "--merge-output-format", "mp4/mkv", "--", url],
-                        env, timeout * 3)
+                d = run(
+                    [
+                        sys.executable,
+                        "-m",
+                        "yt_dlp",
+                        "--ignore-config",
+                        "--no-playlist",
+                        "--no-cache-dir",
+                        "--no-warnings",
+                        "--use-extractors",
+                        ",".join(YTDLP_ALLOWED_EXTRACTORS),
+                        "--socket-timeout",
+                        "20",
+                        "--retries",
+                        "1",
+                        "--extractor-retries",
+                        "1",
+                        *cookie_args_yt,
+                        "-P",
+                        f"home:{workdir}",
+                        "-o",
+                        "yt_%(id)s_%(playlist_index|1)s.%(ext)s",
+                        "--restrict-filenames",
+                        "--no-mtime",
+                        "--no-part",
+                        "--no-progress",
+                        "--merge-output-format",
+                        "mp4/mkv",
+                        "--",
+                        url,
+                    ],
+                    env,
+                    timeout * 3,
+                )
                 res["download_rc"] = d["rc"]
                 res["files"] = [ffprobe_summary(p) for p in sorted(workdir.glob("yt_*")) if p.is_file()]
             result["tools"]["yt-dlp"] = res
@@ -416,20 +541,67 @@ def live_probe_one(entry: dict[str, Any], *, download: bool, cookies: Path | Non
         gd_ok = gd_extractor.find(url) is not None
         if gd_ok:
             opts = ["-o", "audio=false", "-o", "covers=false", "-o", "subtitles=false"]
-            r = run([sys.executable, "-m", "gallery_dl", "--config-ignore", "-j", *opts, "--http-timeout", "20", "-R", "1",
-                     *cookie_args_gd, "--", url], env, timeout)
-            summary = parse_gallerydl_dump(r["out"]) if r["out"].strip() else {"parsed": False, "items": [], "errors": []}
+            r = run(
+                [
+                    sys.executable,
+                    "-m",
+                    "gallery_dl",
+                    "--config-ignore",
+                    "-j",
+                    *opts,
+                    "--http-timeout",
+                    "20",
+                    "-R",
+                    "1",
+                    *cookie_args_gd,
+                    "--",
+                    url,
+                ],
+                env,
+                timeout,
+            )
+            summary = (
+                parse_gallerydl_dump(r["out"]) if r["out"].strip() else {"parsed": False, "items": [], "errors": []}
+            )
             blocked = r["rc"] not in (0, None) or bool(summary.get("errors")) or not summary.get("items")
-            res = {"rc": r["rc"], "timeout": r["timeout"], "summary": summary,
-                   "blocker": classify_blocker(r["err"] + json.dumps(summary.get("errors", []))) if blocked else None,
-                   "stderr_head": r["err"][:400]}
+            res = {
+                "rc": r["rc"],
+                "timeout": r["timeout"],
+                "summary": summary,
+                "blocker": classify_blocker(r["err"] + json.dumps(summary.get("errors", []))) if blocked else None,
+                "stderr_head": r["err"][:400],
+            }
             if not blocked and download:
                 gdir = workdir / "gd"
                 gdir.mkdir(parents=True, exist_ok=True)
-                d = run([sys.executable, "-m", "gallery_dl", "--config-ignore", "-D", str(gdir), "-f", "{num:>03}.{extension}", *opts,
-                         "--http-timeout", "20", "-R", "1", "--no-mtime", "--no-part", *cookie_args_gd, "--", url], env, timeout * 3)
+                d = run(
+                    [
+                        sys.executable,
+                        "-m",
+                        "gallery_dl",
+                        "--config-ignore",
+                        "-D",
+                        str(gdir),
+                        "-f",
+                        "{num:>03}.{extension}",
+                        *opts,
+                        "--http-timeout",
+                        "20",
+                        "-R",
+                        "1",
+                        "--no-mtime",
+                        "--no-part",
+                        *cookie_args_gd,
+                        "--",
+                        url,
+                    ],
+                    env,
+                    timeout * 3,
+                )
                 res["download_rc"] = d["rc"]
-                res["files"] = [ffprobe_summary(p) | {"name_prefix": p.name[:3]} for p in sorted(gdir.glob("*")) if p.is_file()]
+                res["files"] = [
+                    ffprobe_summary(p) | {"name_prefix": p.name[:3]} for p in sorted(gdir.glob("*")) if p.is_file()
+                ]
             result["tools"]["gallery-dl"] = res
         else:
             result["tools"]["gallery-dl"] = {"skipped": "no gallery-dl extractor matches this URL (pattern)"}
@@ -442,9 +614,18 @@ def live_probe_one(entry: dict[str, Any], *, download: bool, cookies: Path | Non
 
 def evaluate(entry: dict[str, Any], result: dict[str, Any]) -> dict[str, Any]:
     """Reduce one raw result to a sanitized verdict (no URL, no IDs, no titles)."""
-    verdict: dict[str, Any] = {"content": base_id(entry["id"]), "ok": False, "tool": None, "items": None,
-                               "kinds": None, "blocker": None, "audio": None, "max_dims": None,
-                               "matches_expected": None, "downloaded_ok": None}
+    verdict: dict[str, Any] = {
+        "content": base_id(entry["id"]),
+        "ok": False,
+        "tool": None,
+        "items": None,
+        "kinds": None,
+        "blocker": None,
+        "audio": None,
+        "max_dims": None,
+        "matches_expected": None,
+        "downloaded_ok": None,
+    }
     if str(result.get("validator", "")).startswith("rejected"):
         verdict["blocker"] = "VALIDATOR_REJECTED"
         return verdict
@@ -473,8 +654,9 @@ def evaluate(entry: dict[str, Any], result: dict[str, Any]) -> dict[str, Any]:
                 audio = all(e.get("has_audio") for e in res["summary"].get("entries", []))  # metadata claim only
             else:
                 audio = None
-            verdict.update(ok=True, tool=tool, items=len(kinds), kinds=kinds, blocker=None,
-                           max_dims=dims or None, audio=audio)
+            verdict.update(
+                ok=True, tool=tool, items=len(kinds), kinds=kinds, blocker=None, max_dims=dims or None, audio=audio
+            )
             if files is not None:
                 verdict["downloaded_ok"] = (
                     bool(files) and all("error" not in f for f in files) and res.get("download_rc") == 0
@@ -491,8 +673,18 @@ def evaluate(entry: dict[str, Any], result: dict[str, Any]) -> dict[str, Any]:
 def summarise_live(verdicts: list[dict[str, Any]], tool_versions: dict[str, str]) -> dict[str, Any]:
     by_content: dict[str, dict[str, Any]] = {}
     for v in verdicts:
-        s = by_content.setdefault(v["content"], {"urls": 0, "ok": 0, "blockers": {}, "tools": {}, "downloaded_ok": 0,
-                                                 "expected_checked": 0, "expected_ok": 0})
+        s = by_content.setdefault(
+            v["content"],
+            {
+                "urls": 0,
+                "ok": 0,
+                "blockers": {},
+                "tools": {},
+                "downloaded_ok": 0,
+                "expected_checked": 0,
+                "expected_ok": 0,
+            },
+        )
         s["urls"] += 1
         s["ok"] += 1 if v["ok"] else 0
         if v["blocker"]:
@@ -587,8 +779,11 @@ def main(argv: list[str] | None = None) -> int:
         return 1 if problems else 0
 
     if not args.corpus.exists():
-        print(f"No corpus at {args.corpus}. Copy tests/live/corpus.example.txt and fill it with "
-              "permission-cleared URLs (see tests/live/README.md).", file=sys.stderr)
+        print(
+            f"No corpus at {args.corpus}. Copy tests/live/corpus.example.txt and fill it with "
+            "permission-cleared URLs (see tests/live/README.md).",
+            file=sys.stderr,
+        )
         return 2
     entries = parse_corpus(args.corpus.read_text(encoding="utf-8"))
     if args.only:
@@ -615,7 +810,11 @@ def main(argv: list[str] | None = None) -> int:
     RAW_DIR.mkdir(parents=True, exist_ok=True)
     raw_path = RAW_DIR / f"results-{datetime.now(UTC).strftime('%Y%m%dT%H%M%SZ')}.json"
     raw_path.write_text(json.dumps(raw, indent=2), encoding="utf-8")
-    versions = {"yt-dlp": tool_version("yt-dlp"), "gallery-dl": tool_version("gallery-dl"), "ffprobe": binary_version("ffprobe")}
+    versions = {
+        "yt-dlp": tool_version("yt-dlp"),
+        "gallery-dl": tool_version("gallery-dl"),
+        "ffprobe": binary_version("ffprobe"),
+    }
     live = summarise_live(verdicts, versions)
     prior = results.get("live", {}).get("by_content", {})
     live["by_content"] = {**prior, **live["by_content"]}  # a partial re-run keeps other content ids

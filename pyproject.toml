@@ -55,9 +55,12 @@ ignore = [
     "S101",   # asserts are fine in tests and for invariants
     "S603",   # subprocess is used deliberately with argument arrays and shell=False
     "S607",   # partial executable paths are resolved via explicit config
+    "ASYNC109",  # explicit `timeout` parameters are a deliberate API (implemented with wait_for inside)
     "RUF001", "RUF002", "RUF003",
 ]
 
 [tool.ruff.lint.per-file-ignores]
-"tests/**" = ["S104", "S105", "S106", "S108", "S311", "E501"]
+"tests/**" = ["S104", "S105", "S106", "S108", "S311", "E501", "ASYNC221", "RUF012", "RUF059"]
 "scripts/**" = ["E501"]
+# IN-clauses are built from constant enum sets as '?' placeholders only; every value is bound.
+"app/storage/db.py" = ["S608"]

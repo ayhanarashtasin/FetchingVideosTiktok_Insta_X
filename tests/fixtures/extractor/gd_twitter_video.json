@@ -1,0 +1,37 @@
+[
+ [
+  2,
+  {
+   "_synthetic": true,
+   "count": 1,
+   "quote_id": 0,
+   "retweet_id": 0,
+   "tweet_id": 1700000000000000000,
+   "user": {
+    "name": "someuser"
+   }
+  }
+ ],
+ [
+  3,
+  "https://pbs.example.invalid/1.mp4",
+  {
+   "_synthetic": true,
+   "bitrate": 2176000,
+   "count": 1,
+   "duration": 6.0,
+   "extension": "mp4",
+   "height": 800,
+   "num": 1,
+   "quote_id": 0,
+   "retweet_id": 0,
+   "source_id": 0,
+   "tweet_id": 1700000000000000000,
+   "type": "video",
+   "user": {
+    "name": "someuser"
+   },
+   "width": 1200
+  }
+ ]
+]

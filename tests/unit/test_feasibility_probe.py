@@ -15,8 +15,9 @@ pytestmark = requires_ffmpeg
 
 
 def _run(module: str, *args: str) -> subprocess.CompletedProcess[str]:
-    return subprocess.run([sys.executable, "-m", module, *args], capture_output=True, text=True,
-                          timeout=120, check=False)
+    return subprocess.run(
+        [sys.executable, "-m", module, *args], capture_output=True, text=True, timeout=120, check=False
+    )
 
 
 # --- real output from the installed tools ---------------------------------------------------
@@ -37,8 +38,9 @@ def test_gallerydl_dump_parser_classifies_video_extension(media_server):
 
 
 def test_ytdlp_info_parser_on_real_output(media_server):
-    p = _run("yt_dlp", "--ignore-config", "--no-playlist", "--no-cache-dir", "-J", "--",
-             f"{media_server}/v_h264_aac.mp4")
+    p = _run(
+        "yt_dlp", "--ignore-config", "--no-playlist", "--no-cache-dir", "-J", "--", f"{media_server}/v_h264_aac.mp4"
+    )
     assert p.returncode == 0, p.stderr
     summary = probe.parse_ytdlp_info(p.stdout)
     assert summary["parsed"] is True and len(summary["entries"]) == 1
@@ -55,13 +57,15 @@ def test_parsers_tolerate_garbage():
 
 
 def test_gallerydl_dump_collects_errors_counts_and_order():
-    dump = json.dumps([
-        [2, {"count": 3}],
-        [3, "u1", {"num": 1, "extension": "jpg", "width": 10, "height": 20}],
-        [3, "u2", {"num": 2, "extension": "mp4", "width": 30, "height": 40}],
-        [3, "u3", {"num": 3, "extension": "mp3"}],
-        [-1, {"error": "AuthRequired", "message": "login needed"}],
-    ])
+    dump = json.dumps(
+        [
+            [2, {"count": 3}],
+            [3, "u1", {"num": 1, "extension": "jpg", "width": 10, "height": 20}],
+            [3, "u2", {"num": 2, "extension": "mp4", "width": 30, "height": 40}],
+            [3, "u3", {"num": 3, "extension": "mp3"}],
+            [-1, {"error": "AuthRequired", "message": "login needed"}],
+        ]
+    )
     s = probe.parse_gallerydl_dump(dump)
     assert s["declared_count"] == 3
     assert [i["kind"] for i in s["items"]] == ["photo", "video", "other:mp3"]
@@ -69,12 +73,23 @@ def test_gallerydl_dump_collects_errors_counts_and_order():
 
 
 def test_ytdlp_playlist_entries_and_audio_detection():
-    info = {"_type": "playlist", "entries": [
-        {"extractor_key": "Instagram", "duration": 5, "formats": [
-            {"vcodec": "avc1", "acodec": "none", "width": 640, "height": 640, "tbr": 100},
-            {"vcodec": "avc1", "acodec": "mp4a", "width": 1080, "height": 1080, "tbr": 900}]},
-        {"extractor_key": "Instagram", "formats": [{"vcodec": "avc1", "acodec": "none", "width": 10, "height": 10}]},
-    ]}
+    info = {
+        "_type": "playlist",
+        "entries": [
+            {
+                "extractor_key": "Instagram",
+                "duration": 5,
+                "formats": [
+                    {"vcodec": "avc1", "acodec": "none", "width": 640, "height": 640, "tbr": 100},
+                    {"vcodec": "avc1", "acodec": "mp4a", "width": 1080, "height": 1080, "tbr": 900},
+                ],
+            },
+            {
+                "extractor_key": "Instagram",
+                "formats": [{"vcodec": "avc1", "acodec": "none", "width": 10, "height": 10}],
+            },
+        ],
+    }
     s = probe.parse_ytdlp_info(json.dumps(info))
     assert [(e["best_width"], e["has_audio"]) for e in s["entries"]] == [(1080, True), (10, False)]
 
@@ -114,29 +129,42 @@ def test_corpus_rejects_malformed_lines(bad):
 
 
 def gd(items):
-    return {"summary": {"items": [{"num": i + 1, "kind": k, "width": 100, "height": 50} for i, k in enumerate(items)],
-                        "errors": []}, "blocker": None, "rc": 0}
+    return {
+        "summary": {
+            "items": [{"num": i + 1, "kind": k, "width": 100, "height": 50} for i, k in enumerate(items)],
+            "errors": [],
+        },
+        "blocker": None,
+        "rc": 0,
+    }
 
 
 def test_evaluate_verifies_count_and_order():
     entry = {"id": "P05", "url": "https://u", "kinds": ["photo", "video", "photo"]}
     ok = probe.evaluate(entry, {"validator": "accepted", "tools": {"gallery-dl": gd(["photo", "video", "photo"])}})
     assert ok["ok"] and ok["matches_expected"] is True and ok["items"] == 3
-    wrong_order = probe.evaluate(entry, {"validator": "accepted", "tools": {"gallery-dl": gd(["photo", "photo", "video"])}})
+    wrong_order = probe.evaluate(
+        entry, {"validator": "accepted", "tools": {"gallery-dl": gd(["photo", "photo", "video"])}}
+    )
     assert wrong_order["matches_expected"] is False
 
 
 def test_evaluate_records_blockers_without_retrying_around_them():
-    blocked = {"validator": "accepted", "tools": {
-        "gallery-dl": {"blocker": "AUTH_REQUIRED", "summary": {}},
-        "yt-dlp": {"skipped": "pattern"},
-    }}
+    blocked = {
+        "validator": "accepted",
+        "tools": {
+            "gallery-dl": {"blocker": "AUTH_REQUIRED", "summary": {}},
+            "yt-dlp": {"skipped": "pattern"},
+        },
+    }
     v = probe.evaluate({"id": "P06", "url": "https://u"}, blocked)
     assert v["ok"] is False and v["blocker"] == "AUTH_REQUIRED"
 
 
 def test_evaluate_validator_rejection_is_not_a_network_attempt():
-    v = probe.evaluate({"id": "P01", "url": "https://evil.example/"}, {"validator": "rejected INVALID_URL", "tools": {}})
+    v = probe.evaluate(
+        {"id": "P01", "url": "https://evil.example/"}, {"validator": "rejected INVALID_URL", "tools": {}}
+    )
     assert v["blocker"] == "VALIDATOR_REJECTED"
 
 
@@ -165,6 +193,8 @@ def test_blocker_classification():
 
 def test_replace_block_requires_markers():
     text = "a\n<!-- MATRIX:START -->\nold\n<!-- MATRIX:END -->\nb"
-    assert "new" in probe.replace_block(text, "MATRIX", "new") and "old" not in probe.replace_block(text, "MATRIX", "new")
+    assert "new" in probe.replace_block(text, "MATRIX", "new") and "old" not in probe.replace_block(
+        text, "MATRIX", "new"
+    )
     with pytest.raises(SystemExit):
         probe.replace_block("no markers", "MATRIX", "x")

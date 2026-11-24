@@ -113,8 +113,14 @@ class JobRunner:
                 ctx.error = err
                 ctx.state = JobState.CANCELLED if err.code is ErrorCode.CANCELLED else JobState.FAILED
             except Exception as exc:
-                log_event(log, logging.ERROR, "unexpected error in job", job_id=job_id,
-                          error_type=type(exc).__name__, error=redact(exc))
+                log_event(
+                    log,
+                    logging.ERROR,
+                    "unexpected error in job",
+                    job_id=job_id,
+                    error_type=type(exc).__name__,
+                    error=redact(exc),
+                )
                 ctx.error = BotError(ErrorCode.INTERNAL_ERROR, type(exc).__name__)
                 ctx.state = JobState.FAILED
             await asyncio.shield(self._finish(handle, ctx, started))
@@ -171,15 +177,22 @@ class JobRunner:
                             "post_hint": validated.post_hint,
                         }
                     )
-                    manifest = await self.extractor.discover(request, deadline)
+                    manifest = await self.extractor.discover(request, workspace, deadline)
                     self._check_manifest(manifest)
                     return await self.extractor.fetch(request, manifest, workspace, deadline)
             except TimeoutError:
                 raise BotError(ErrorCode.DOWNLOAD_TIMEOUT, "hard extraction timeout") from None
 
         def on_retry(n: int, delay: float, exc: BaseException) -> None:
-            log_event(log, logging.WARNING, "retrying extraction", job_id=handle.job.id, attempt=n,
-                      delay=round(delay, 1), error=getattr(getattr(exc, "code", None), "value", type(exc).__name__))
+            log_event(
+                log,
+                logging.WARNING,
+                "retrying extraction",
+                job_id=handle.job.id,
+                attempt=n,
+                delay=round(delay, 1),
+                error=getattr(getattr(exc, "code", None), "value", type(exc).__name__),
+            )
 
         try:
             result = await retry_async(
@@ -252,12 +265,19 @@ class JobRunner:
                 or (job.state is JobState.FAILED and ctx.error is not None and ctx.error.owner_retryable)
             ),
         )
-        log_event(log, logging.INFO, "job finished", job_id=job_id, platform=job.platform.value,
-                  state=job.state.value, delivered=job.delivered_count, expected=report.expected,
-                  error_code=error_code.value if isinstance(error_code, ErrorCode) else error_code,
-                  duration_s=round(time.monotonic() - started, 1))
+        log_event(
+            log,
+            logging.INFO,
+            "job finished",
+            job_id=job_id,
+            platform=job.platform.value,
+            state=job.state.value,
+            delivered=job.delivered_count,
+            expected=report.expected,
+            error_code=error_code.value if isinstance(error_code, ErrorCode) else error_code,
+            duration_s=round(time.monotonic() - started, 1),
+        )
         try:
             await self.notifier.finish(job, report)
         except Exception as exc:
-            log_event(log, logging.WARNING, "could not send final status", job_id=job_id,
-                      error_type=type(exc).__name__)
+            log_event(log, logging.WARNING, "could not send final status", job_id=job_id, error_type=type(exc).__name__)

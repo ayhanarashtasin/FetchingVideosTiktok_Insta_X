@@ -213,9 +213,7 @@ class Settings(BaseSettings):
         if self.local_file_max_bytes > TELEGRAM_LOCAL_FILE_CEILING:
             problems.append("LOCAL_FILE_MAX_BYTES exceeds the local Bot API 2000 MB limit")
 
-        if self.bot_api_mode == "local" and not self.local_bot_api_url.startswith(
-            ("http://", "https://")
-        ):
+        if self.bot_api_mode == "local" and not self.local_bot_api_url.startswith(("http://", "https://")):
             problems.append("LOCAL_BOT_API_URL must be an http(s) URL when BOT_API_MODE=local")
 
         if self.worker_mode == "remote":
@@ -227,9 +225,7 @@ class Settings(BaseSettings):
                 secret = ""
                 problems.append(str(exc))
             if len(secret) < 24 or secret.lower() in _PLACEHOLDERS:
-                problems.append(
-                    "WORKER_SECRET(_FILE) must be a random value of at least 24 characters"
-                )
+                problems.append("WORKER_SECRET(_FILE) must be a random value of at least 24 characters")
         elif prod:
             problems.append(
                 "WORKER_MODE=inprocess shares the bot's environment and is NOT isolated; "

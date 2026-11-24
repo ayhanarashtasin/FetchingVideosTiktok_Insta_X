@@ -70,8 +70,13 @@ class AuthMiddleware(BaseMiddleware):
             uid = actor.user_id if actor else None
             if uid is not None and uid not in self._warned and len(self._warned) < 1000:
                 self._warned.add(uid)
-                log_event(log, logging.WARNING, "rejected update from unauthorized sender",
-                          user_id=uid, chat_type=actor.chat_type if actor else None)
+                log_event(
+                    log,
+                    logging.WARNING,
+                    "rejected update from unauthorized sender",
+                    user_id=uid,
+                    chat_type=actor.chat_type if actor else None,
+                )
             return None  # dropped: no handler, no reply, no network activity
         data["owner_id"] = actor.user_id
         return await handler(event, data)

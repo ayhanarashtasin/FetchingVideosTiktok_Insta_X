@@ -33,9 +33,7 @@ class ErrorCode(StrEnum):
 # Codes for which an automatic, bounded retry may be attempted (FR-16). Everything else is
 # never retried automatically. RATE_LIMITED and UPLOAD_FAILED are additionally conditional
 # (see `BotError.auto_retryable`).
-_AUTO_RETRY_CODES = frozenset(
-    {ErrorCode.DOWNLOAD_TIMEOUT, ErrorCode.RATE_LIMITED, ErrorCode.UPLOAD_FAILED}
-)
+_AUTO_RETRY_CODES = frozenset({ErrorCode.DOWNLOAD_TIMEOUT, ErrorCode.RATE_LIMITED, ErrorCode.UPLOAD_FAILED})
 
 # Codes after which the owner may be offered a manual "Retry" button (T05.9).
 _OWNER_RETRY_CODES = frozenset(

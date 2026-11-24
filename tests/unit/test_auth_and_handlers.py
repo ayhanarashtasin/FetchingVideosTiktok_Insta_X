@@ -171,8 +171,9 @@ async def test_duplicate_telegram_update_makes_one_job_and_one_ack(app):  # AT22
 
 
 async def test_queue_full_is_reported(tmp_path):
-    a = await build_app(tmp_path, start_workers=False, allowed_user_ids=[1, 2, 3], max_queue_size=2,
-                        max_active_jobs_per_user=1)
+    a = await build_app(
+        tmp_path, start_workers=False, allowed_user_ids=[1, 2, 3], max_queue_size=2, max_active_jobs_per_user=1
+    )
     try:
         for uid in (1, 2):
             await a.feed(message_update(GOOD, user_id=uid, message_id=1))
@@ -186,6 +187,7 @@ async def test_queue_full_is_reported(tmp_path):
 async def test_handler_crash_is_contained_and_reported(tmp_path):
     a = await build_app(tmp_path, start_workers=False)
     try:
+
         def boom(*args, **kwargs):
             raise RuntimeError("db exploded with https://secret.example/x")
 

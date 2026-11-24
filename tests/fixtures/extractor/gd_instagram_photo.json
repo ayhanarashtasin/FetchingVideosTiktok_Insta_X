@@ -1,0 +1,35 @@
+[
+ [
+  2,
+  {
+   "_synthetic": true,
+   "count": 1,
+   "owner_id": "42",
+   "post_id": "3000000000000000000",
+   "post_shortcode": "ABCdef12345",
+   "post_url": "https://www.instagram.com/p/ABCdef12345/",
+   "username": "someuser"
+  }
+ ],
+ [
+  3,
+  "https://scontent.example.invalid/1.jpg",
+  {
+   "_synthetic": true,
+   "count": 1,
+   "display_url": "https://scontent.example.invalid/1.jpg",
+   "extension": "jpg",
+   "height": 1350,
+   "media_id": "3100000000000000001",
+   "num": 1,
+   "owner_id": "42",
+   "post_id": "3000000000000000000",
+   "post_shortcode": "ABCdef12345",
+   "post_url": "https://www.instagram.com/p/ABCdef12345/",
+   "shortcode": "ABCdef123451",
+   "username": "someuser",
+   "video_url": null,
+   "width": 1080
+  }
+ ]
+]

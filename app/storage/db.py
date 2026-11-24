@@ -109,8 +109,7 @@ class Database:
         applied: list[str] = []
         with self._lock:
             self._conn.execute(
-                "CREATE TABLE IF NOT EXISTS schema_migrations "
-                "(name TEXT PRIMARY KEY, applied_at TEXT NOT NULL)"
+                "CREATE TABLE IF NOT EXISTS schema_migrations (name TEXT PRIMARY KEY, applied_at TEXT NOT NULL)"
             )
             done = {r["name"] for r in self._conn.execute("SELECT name FROM schema_migrations")}
             for sql_file in sorted(MIGRATIONS_DIR.glob("*.sql")):
@@ -213,7 +212,7 @@ class Database:
             if dup:
                 return ReserveOutcome.DUPLICATE
             (active,) = conn.execute(
-                f"SELECT COUNT(*) FROM jobs WHERE owner_id = ? AND state IN ({placeholders})",  # noqa: S608 - only '?' placeholders are interpolated; every value is bound
+                f"SELECT COUNT(*) FROM jobs WHERE owner_id = ? AND state IN ({placeholders})",
                 (job.owner_id, *[s.value for s in ACTIVE_STATES]),
             ).fetchone()
             if active >= max_active_per_user:
@@ -224,11 +223,24 @@ class Database:
                 "error_code, parent_job_id, status_message_id, created_at, updated_at, expires_at) "
                 "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
-                    job.id, job.owner_id, job.chat_id, job.origin_message_id, job.original_url,
-                    job.platform.value, job.delivery_mode.value, job.state.value, job.request_key,
-                    job.expected_count, job.delivered_count, json.dumps(job.result_message_ids),
-                    job.error_code, job.parent_job_id, job.status_message_id,
-                    job.created_at, job.updated_at, job.expires_at,
+                    job.id,
+                    job.owner_id,
+                    job.chat_id,
+                    job.origin_message_id,
+                    job.original_url,
+                    job.platform.value,
+                    job.delivery_mode.value,
+                    job.state.value,
+                    job.request_key,
+                    job.expected_count,
+                    job.delivered_count,
+                    json.dumps(job.result_message_ids),
+                    job.error_code,
+                    job.parent_job_id,
+                    job.status_message_id,
+                    job.created_at,
+                    job.updated_at,
+                    job.expires_at,
                 ),
             )
         return ReserveOutcome.ACCEPTED
@@ -259,9 +271,11 @@ class Database:
                 "error_code = COALESCE(?, error_code), expected_count = COALESCE(?, expected_count) "
                 "WHERE id = ?",
                 (
-                    new_state.value, iso(self._clock()),
+                    new_state.value,
+                    iso(self._clock()),
                     str(error_code) if error_code is not None else None,
-                    expected_count, job_id,
+                    expected_count,
+                    job_id,
                 ),
             )
             row = conn.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
@@ -269,8 +283,10 @@ class Database:
 
     def set_status_message(self, job_id: str, message_id: int) -> None:
         with self._tx() as conn:
-            conn.execute("UPDATE jobs SET status_message_id = ?, updated_at = ? WHERE id = ?",
-                         (message_id, iso(self._clock()), job_id))
+            conn.execute(
+                "UPDATE jobs SET status_message_id = ?, updated_at = ? WHERE id = ?",
+                (message_id, iso(self._clock()), job_id),
+            )
 
     def record_delivery(
         self,
@@ -286,12 +302,20 @@ class Database:
             conn.execute(
                 "INSERT OR REPLACE INTO job_deliveries (job_id, batch_index, positions, outcome, "
                 "message_ids, error_code, created_at) VALUES (?,?,?,?,?,?,?)",
-                (job_id, batch_index, json.dumps(positions), outcome, json.dumps(message_ids),
-                 str(error_code) if error_code is not None else None, iso(self._clock())),
+                (
+                    job_id,
+                    batch_index,
+                    json.dumps(positions),
+                    outcome,
+                    json.dumps(message_ids),
+                    str(error_code) if error_code is not None else None,
+                    iso(self._clock()),
+                ),
             )
             if outcome == "sent":
-                row = conn.execute("SELECT delivered_count, result_message_ids FROM jobs WHERE id = ?",
-                                   (job_id,)).fetchone()
+                row = conn.execute(
+                    "SELECT delivered_count, result_message_ids FROM jobs WHERE id = ?", (job_id,)
+                ).fetchone()
                 if row:
                     ids = json.loads(row["result_message_ids"]) + message_ids
                     conn.execute(
@@ -305,14 +329,19 @@ class Database:
                 "SELECT * FROM job_deliveries WHERE job_id = ? ORDER BY batch_index", (job_id,)
             ).fetchall()
         return [
-            DeliveryRow(r["batch_index"], json.loads(r["positions"]), r["outcome"],
-                        json.loads(r["message_ids"]), r["error_code"])
+            DeliveryRow(
+                r["batch_index"],
+                json.loads(r["positions"]),
+                r["outcome"],
+                json.loads(r["message_ids"]),
+                r["error_code"],
+            )
             for r in rows
         ]
 
     def active_jobs(self, owner_id: int | None = None) -> list[JobRecord]:
         placeholders = ",".join("?" for _ in ACTIVE_STATES)
-        sql = f"SELECT * FROM jobs WHERE state IN ({placeholders})"  # noqa: S608 - only '?' placeholders are interpolated; every value is bound
+        sql = f"SELECT * FROM jobs WHERE state IN ({placeholders})"
         params: list[object] = [s.value for s in ACTIVE_STATES]
         if owner_id is not None:
             sql += " AND owner_id = ?"
@@ -328,17 +357,19 @@ class Database:
         now = iso(self._clock())
         with self._tx() as conn:
             rows = conn.execute(
-                f"SELECT * FROM jobs WHERE state IN ({placeholders})", [s.value for s in ACTIVE_STATES]  # noqa: S608 - only '?' placeholders are interpolated; every value is bound
+                f"SELECT * FROM jobs WHERE state IN ({placeholders})",
+                [s.value for s in ACTIVE_STATES],
             ).fetchall()
             conn.execute(
-                f"UPDATE jobs SET state = ?, error_code = ?, updated_at = ? WHERE state IN ({placeholders})",  # noqa: S608 - only '?' placeholders are interpolated; every value is bound
+                f"UPDATE jobs SET state = ?, error_code = ?, updated_at = ? WHERE state IN ({placeholders})",
                 (JobState.INTERRUPTED.value, ErrorCode.INTERRUPTED.value, now, *[s.value for s in ACTIVE_STATES]),
             )
         interrupted = []
         for r in rows:
             job = self._row_to_job(r)
-            interrupted.append(job.model_copy(update={"state": JobState.INTERRUPTED,
-                                                      "error_code": ErrorCode.INTERRUPTED.value}))
+            interrupted.append(
+                job.model_copy(update={"state": JobState.INTERRUPTED, "error_code": ErrorCode.INTERRUPTED.value})
+            )
         return interrupted
 
     def purge_expired(self) -> PurgeResult:
@@ -350,12 +381,12 @@ class Database:
         placeholders = ",".join("?" for _ in TERMINAL_STATES)
         with self._tx() as conn:
             (deliveries,) = conn.execute(
-                f"SELECT COUNT(*) FROM job_deliveries WHERE job_id IN "  # noqa: S608 - only '?' placeholders interpolated
+                f"SELECT COUNT(*) FROM job_deliveries WHERE job_id IN "
                 f"(SELECT id FROM jobs WHERE expires_at <= ? AND state IN ({placeholders}))",
                 (now, *[s.value for s in TERMINAL_STATES]),
             ).fetchone()
             cur = conn.execute(
-                f"DELETE FROM jobs WHERE expires_at <= ? AND state IN ({placeholders})",  # noqa: S608 - only '?' placeholders are interpolated; every value is bound
+                f"DELETE FROM jobs WHERE expires_at <= ? AND state IN ({placeholders})",
                 (now, *[s.value for s in TERMINAL_STATES]),
             )
         return PurgeResult(jobs=cur.rowcount, deliveries=deliveries)
@@ -363,8 +394,7 @@ class Database:
     # ------------------------------------------------------------------ preferences
     def get_delivery_mode(self, owner_id: int, default: DeliveryMode) -> DeliveryMode:
         with self._lock:
-            row = self._conn.execute("SELECT delivery_mode FROM preferences WHERE owner_id = ?",
-                                     (owner_id,)).fetchone()
+            row = self._conn.execute("SELECT delivery_mode FROM preferences WHERE owner_id = ?", (owner_id,)).fetchone()
         return DeliveryMode(row["delivery_mode"]) if row else default
 
     def set_delivery_mode(self, owner_id: int, mode: DeliveryMode) -> None:
