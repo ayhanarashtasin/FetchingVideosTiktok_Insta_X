@@ -114,6 +114,7 @@ def test_gitignore_actually_ignores_secret_locations():
                  "tests/live/corpus.txt", "downloads/a.jpg", "cookies.txt"):
         r = subprocess.run(["git", "-C", str(REPO), "check-ignore", "-q", path], timeout=30)
         assert r.returncode == 0, f"{path} is not git-ignored"
-    # ...but the template must stay trackable
-    r = subprocess.run(["git", "-C", str(REPO), "check-ignore", "-q", ".env.example"], timeout=30)
-    assert r.returncode == 1
+    # ...but the templates must stay trackable (a too-broad `corpus.*.txt` rule once ignored the example)
+    for template in (".env.example", "tests/live/corpus.example.txt"):
+        r = subprocess.run(["git", "-C", str(REPO), "check-ignore", "-q", template], timeout=30)
+        assert r.returncode == 1, f"{template} must not be git-ignored"

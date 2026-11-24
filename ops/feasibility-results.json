@@ -1,0 +1,190 @@
+{
+  "offline": {
+    "generated": "2026-11-24T11:18:35Z",
+    "missing_flags": {
+      "gallery-dl": [],
+      "yt-dlp": []
+    },
+    "python": "3.12.15",
+    "routing": [
+      {
+        "app_validator": "accepted (post, video)",
+        "case": "P01 TikTok video",
+        "gallerydl": "tiktok:post",
+        "ytdlp": [
+          "TikTok",
+          "generic"
+        ]
+      },
+      {
+        "app_validator": "accepted (short_link, resolve first)",
+        "case": "P01 TikTok short (vm)",
+        "gallerydl": "tiktok:vmpost",
+        "ytdlp": [
+          "vm.tiktok",
+          "generic"
+        ]
+      },
+      {
+        "app_validator": "accepted (short_link, resolve first)",
+        "case": "P01 TikTok short (vt)",
+        "gallerydl": "tiktok:vmpost",
+        "ytdlp": [
+          "vm.tiktok",
+          "generic"
+        ]
+      },
+      {
+        "app_validator": "accepted (short_link, resolve first)",
+        "case": "P01 TikTok short (/t/)",
+        "gallerydl": "tiktok:vmpost",
+        "ytdlp": [
+          "vm.tiktok",
+          "generic"
+        ]
+      },
+      {
+        "app_validator": "accepted (post, photo)",
+        "case": "P02 TikTok photo",
+        "gallerydl": "tiktok:post",
+        "ytdlp": [
+          "generic"
+        ]
+      },
+      {
+        "app_validator": "accepted (post, post)",
+        "case": "P03 Instagram post",
+        "gallerydl": "instagram:post",
+        "ytdlp": [
+          "Instagram",
+          "generic"
+        ]
+      },
+      {
+        "app_validator": "accepted (post, reel)",
+        "case": "P04 Instagram reel",
+        "gallerydl": "instagram:reel",
+        "ytdlp": [
+          "Instagram",
+          "generic"
+        ]
+      },
+      {
+        "app_validator": "accepted (post, post)",
+        "case": "P05 Instagram carousel",
+        "gallerydl": "instagram:post",
+        "ytdlp": [
+          "Instagram",
+          "generic"
+        ]
+      },
+      {
+        "app_validator": "accepted (post, story)",
+        "case": "P06/P07 Instagram story",
+        "gallerydl": "instagram:stories",
+        "ytdlp": [
+          "instagram:story",
+          "generic"
+        ]
+      },
+      {
+        "app_validator": "accepted (short_link, resolve first)",
+        "case": "IG share link",
+        "gallerydl": "instagram:post",
+        "ytdlp": [
+          "generic"
+        ]
+      },
+      {
+        "app_validator": "accepted (post, tweet)",
+        "case": "P08/P09 X (x.com)",
+        "gallerydl": "twitter:tweet",
+        "ytdlp": [
+          "twitter",
+          "generic"
+        ]
+      },
+      {
+        "app_validator": "accepted (post, tweet)",
+        "case": "P08/P09 X (twitter.com)",
+        "gallerydl": "twitter:tweet",
+        "ytdlp": [
+          "twitter",
+          "generic"
+        ]
+      },
+      {
+        "app_validator": "rejected UNSUPPORTED_POST",
+        "case": "excluded: IG highlight",
+        "gallerydl": "instagram:highlights",
+        "ytdlp": [
+          "instagram:story",
+          "generic"
+        ]
+      },
+      {
+        "app_validator": "rejected UNSUPPORTED_POST",
+        "case": "excluded: IG story w/o id",
+        "gallerydl": "instagram:stories",
+        "ytdlp": [
+          "instagram:story",
+          "generic"
+        ]
+      },
+      {
+        "app_validator": "rejected UNSUPPORTED_POST",
+        "case": "excluded: TikTok profile",
+        "gallerydl": "tiktok:user",
+        "ytdlp": [
+          "tiktok:user",
+          "generic"
+        ]
+      },
+      {
+        "app_validator": "rejected UNSUPPORTED_POST",
+        "case": "excluded: IG profile",
+        "gallerydl": "instagram:user",
+        "ytdlp": [
+          "instagram:user",
+          "generic"
+        ]
+      },
+      {
+        "app_validator": "rejected UNSUPPORTED_POST",
+        "case": "excluded: X profile",
+        "gallerydl": "twitter:user",
+        "ytdlp": [
+          "generic"
+        ]
+      }
+    ],
+    "tools": {
+      "aiogram": {
+        "license": "MIT",
+        "version": "3.34.0"
+      },
+      "ffmpeg": {
+        "version": "ffmpeg version 9.0.2-full_build-www.gyan.dev Copyright (c) 2000-2026 the FFmpeg developers"
+      },
+      "ffprobe": {
+        "version": "ffprobe version 9.0.2-full_build-www.gyan.dev Copyright (c) 2007-2026 the FFmpeg developers"
+      },
+      "gallery-dl": {
+        "invocation": "subprocess ONLY (GPL-2.0-only: never imported by project code)",
+        "license": "GPL-2.0-only",
+        "version": "1.32.21"
+      },
+      "yt-dlp": {
+        "invocation": "subprocess",
+        "license": "Unlicense",
+        "version": "2026.11.23"
+      }
+    },
+    "ytdlp_allowed_extractors": [
+      "tiktok",
+      "instagram",
+      "instagram:story",
+      "twitter"
+    ]
+  }
+}

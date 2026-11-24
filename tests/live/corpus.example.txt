@@ -1,0 +1,25 @@
+# Live-test corpus TEMPLATE (T00.6). Copy to tests/live/corpus.txt (git-ignored) and fill in.
+#
+# Only list posts you OWN, are LICENSED to use, or have EXPLICIT PERMISSION to download.
+# Never list private, Close Friends, protected or paywalled content. Never commit the real file.
+#
+# Format, one entry per line:   ID  URL  [count=N]  [kinds=photo,video,...]
+#   ID     content type from the PRD (P01..P09). Several lines per ID are encouraged (>= 3 each).
+#   count  optional: the number of items you can SEE in the post (verifies completeness)
+#   kinds  optional: the visible order of items, e.g. kinds=photo,video,photo (verifies order)
+#
+# P01  Single TikTok video (long link or vm./vt. short link)
+# P02  TikTok photo-mode post / slideshow                 e.g.  count=6
+# P03  Instagram single photo post
+# P04  Instagram Reel or video post
+# P05  Instagram carousel (photo or mixed photo/video)    e.g.  kinds=photo,video,photo
+# P06  ACTIVE public Instagram photo Story (collect shortly before testing - Stories expire in 24h)
+# P07  ACTIVE public Instagram video Story
+# P08  X/Twitter single or multi-photo post               e.g.  count=4
+# P09  X/Twitter video or mixed-media post
+#
+# P01  https://vm.tiktok.com/XXXXXXXXX/
+# P02  https://www.tiktok.com/@your_account/photo/0000000000000000000  count=6
+# P05  https://www.instagram.com/p/XXXXXXXXXXX/  kinds=photo,video,photo
+# P06  https://www.instagram.com/stories/your_account/0000000000000000000/
+# P08  https://x.com/your_account/status/0000000000000000000  count=4
