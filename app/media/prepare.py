@@ -25,7 +25,7 @@ DURATION_TOLERANCE = 0.5  # seconds: container rounding only; a bigger gap means
 
 
 async def remux_to_mp4(
-    asset: MediaAsset, *, runner: ProcessRunner, ffmpeg: str, timeout: float = 120.0
+    asset: MediaAsset, *, runner: ProcessRunner, ffmpeg: str, timeout: float = 120.0, min_free_bytes: int = 0
 ) -> MediaAsset | None:
     """Stream-copy `asset` into an MP4. Returns the new asset, or None if it cannot be done losslessly."""
     src = asset.local_path
@@ -36,8 +36,16 @@ async def remux_to_mp4(
         "-map", "0:v", "-map", "0:a?",  # all video + audio streams; never data/subtitle/attachment streams
         "-c", "copy", "-movflags", "+faststart", "-f", "mp4", str(dest),
     ]  # fmt: skip
-    res = await runner.run(args, cwd=src.parent, env=sanitized_env(src.parent), timeout=timeout, max_stderr=20_000)
-    if res.returncode != 0 or res.timed_out or not dest.exists():
+    res = await runner.run(
+        args,
+        cwd=src.parent,
+        env=sanitized_env(src.parent),
+        timeout=timeout,
+        max_stderr=20_000,
+        watch_dir=src.parent,  # the output is a second copy of the video: stop if the disk is running out
+        min_free_bytes=min_free_bytes,
+    )
+    if res.returncode != 0 or res.timed_out or res.killed_for_budget or not dest.exists():
         dest.unlink(missing_ok=True)
         return None
     try:
@@ -79,6 +87,7 @@ async def prepare_assets(
     native_hevc: bool = False,
     runner: ProcessRunner | None = None,
     ffmpeg: str | None = None,
+    min_free_bytes: int = 0,
 ) -> list[MediaAsset]:
     """Apply the lossless remux where (and only where) it changes native playability.
 
@@ -106,7 +115,7 @@ async def prepare_assets(
         )  # fmt: skip
         if wants_remux:
             assert exe is not None
-            remuxed = await remux_to_mp4(asset, runner=run, ffmpeg=exe)
+            remuxed = await remux_to_mp4(asset, runner=run, ffmpeg=exe, min_free_bytes=min_free_bytes)
             if remuxed is not None:
                 out.append(remuxed)
                 continue

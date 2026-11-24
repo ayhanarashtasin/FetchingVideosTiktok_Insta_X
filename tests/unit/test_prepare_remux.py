@@ -153,3 +153,23 @@ async def test_ffmpeg_only_ever_sees_paths_we_generate(media, tmp_path, hostile)
     assert calls and all(hostile not in a for a in calls[0])
     assert "-protocol_whitelist" in calls[0] and calls[0][calls[0].index("-protocol_whitelist") + 1] == "file"
     assert "-nostdin" in calls[0]
+
+
+async def test_remux_is_abandoned_and_the_original_kept_when_the_disk_headroom_is_gone(media, tmp_path):
+    """T05.4: the remux writes a second copy of the video. If the runner reports it was killed for lack of
+    disk space the partial output is deleted and the ORIGINAL is kept (deterministic stub; the real watcher is
+    covered in test_subprocess_runner)."""
+    from app.services.subprocess_runner import ProcessResult
+
+    src = await asset_from(media.mkv_h264_aac, dest_dir=tmp_path)
+    seen: dict = {}
+
+    class LowDisk:
+        async def run(self, args, **kw):
+            seen.update(kw)
+            (src.local_path.parent / "rm_000.mp4").write_bytes(b"partial")  # what ffmpeg had written so far
+            return ProcessResult(returncode=-9, stdout=b"", stderr=b"", killed_for_budget=True)
+
+    out = await remux_to_mp4(src, runner=LowDisk(), ffmpeg="ffmpeg", min_free_bytes=123_456)
+    assert out is None and src.local_path.exists() and not list(tmp_path.glob("rm_*"))
+    assert seen["min_free_bytes"] == 123_456 and seen["watch_dir"] == src.local_path.parent  # the guard was armed

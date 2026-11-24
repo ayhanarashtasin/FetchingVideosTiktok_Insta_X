@@ -213,7 +213,8 @@ class SubprocessRunner:
         async def watcher() -> None:
             nonlocal killed_for_budget
             while True:
-                await asyncio.sleep(WATCH_INTERVAL_SECONDS)
+                # Check FIRST, then sleep: if the disk is already below the floor we must not let a big
+                # write begin, and a budget breach is noticed at once instead of one interval later.
                 over = max_dir_bytes is not None and watch_dir is not None and _dir_size(watch_dir) > max_dir_bytes
                 low = (
                     min_free_bytes > 0 and watch_dir is not None and shutil.disk_usage(watch_dir).free < min_free_bytes
@@ -222,6 +223,7 @@ class SubprocessRunner:
                     killed_for_budget = True
                     await kill_process_tree(proc)
                     return
+                await asyncio.sleep(WATCH_INTERVAL_SECONDS)
 
         out_task = asyncio.create_task(_drain(proc.stdout, max_stdout))
         err_task = asyncio.create_task(_drain(proc.stderr, max_stderr))

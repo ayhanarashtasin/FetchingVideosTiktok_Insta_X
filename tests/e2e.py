@@ -8,7 +8,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import sqlite3
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -29,7 +29,7 @@ class E2E:
     server: FakeTelegramServer
     settings: Settings
     tools: FakeToolRunner
-    backend: LocalExtractionBackend
+    backend: Any
     task: asyncio.Task[None]
 
     async def say(self, text: str, *, message_id: int, user_id: int = OWNER, chat_type: str = "private") -> None:
@@ -71,7 +71,14 @@ class E2E:
         await self.server.stop()
 
 
-async def start_e2e(tmp_path: Path, *, before_start: Callable[[Settings], None] | None = None, **overrides: Any) -> E2E:
+async def start_e2e(
+    tmp_path: Path,
+    *,
+    before_start: Callable[[Settings], None] | None = None,
+    tools: FakeToolRunner | None = None,
+    extractor_factory: Callable[[Settings, FakeToolRunner], Awaitable[Any]] | None = None,
+    **overrides: Any,
+) -> E2E:
     server = FakeTelegramServer()
     base = await server.start()
     params: dict[str, Any] = {
@@ -91,8 +98,12 @@ async def start_e2e(tmp_path: Path, *, before_start: Callable[[Settings], None] 
     settings = Settings(_env_file=None, **params)
     if before_start is not None:
         before_start(settings)  # seed state a previous process would have left behind
-    tools = FakeToolRunner()
-    backend = LocalExtractionBackend(settings, runner=tools)
+    tools = tools or FakeToolRunner()
+    backend = (
+        await extractor_factory(settings, tools)
+        if extractor_factory is not None
+        else LocalExtractionBackend(settings, runner=tools)
+    )
     task = asyncio.create_task(run(settings, extractor=backend, handle_signals=False), name="e2e-app")
     e2e = E2E(server, settings, tools, backend, task)
     await server.wait_for(lambda: server.polls >= 1 or task.done(), timeout=8)

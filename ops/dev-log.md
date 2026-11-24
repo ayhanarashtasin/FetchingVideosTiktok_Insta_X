@@ -192,3 +192,32 @@ Built: `app/media/{prepare,delivery_plan}.py`, `app/services/telegram_sender.py`
   no replay after an uncertain send, lossless-only video preparation, honest PARTIAL/UNVERIFIED/DELIVERY_UNKNOWN states.
 * NOT ESTABLISHED: behaviour of the REAL Telegram service and clients (T01.8/T01.9/T06.6): whether it accepts every
   album shape, that videos play on Android/iOS, the real hosted size ceiling, the real local Bot API server.
+
+---
+
+## Phase 5 - security, reliability, operations (2026-11-24) - code part
+
+Built: `app/extractors/{wire,service,remote}.py` (isolated worker + client), `app/services/egress_proxy.py`,
+`app/services/alerts.py`, disk-headroom guard for the remux, `tests/integration/test_{egress_proxy,worker_service,security_gates}.py`.
+
+| Check | Result |
+| --- | --- |
+| Whole suite, Windows | PASS - 921 passed, 9 skipped (symlink/POSIX-only) |
+| Egress proxy policy (`test_egress_proxy.py`, 42 tests) | PASS. **Mutation-checked:** removing the allowlist, dialing the name instead of the validated IP, resolving DNS before the allowlist, allowing IP literals, or accepting private answers each makes the suite fail |
+| Worker boundary (`test_worker_service.py`, 37 tests) | PASS - bad/missing secret never reaches the backend; workspaces outside `<WORK_DIR>/<32hex>`, symlinks, mismatched URL/platform, malformed/oversized bodies are rejected before any work; typed errors cross without their free-text detail; the full bot (polling, queue, runner, sender) runs unchanged against the worker over HTTP |
+| Security fuzz (`test_security_gates.py`, 26 tests) | PASS - 10,000+ random/mutated URLs never crash the validator and anything accepted is canonical https on an allowed host; callback parser accepts only `prefix + 32 lowercase hex`; redactor removes 1,500 planted secrets; no `parse_mode` ever reaches Telegram |
+
+### Findings
+* A bare-lambda route handler tripped aiohttp's deprecation warning -> proper `async` handlers.
+* The subprocess watcher slept before its first check, so a tiny job could finish before a low-disk condition was noticed
+  -> it now checks first, then sleeps (a big write is not even started when the disk is already below the floor).
+* The e2e helper's "separate job directory" assumption was wrong: the worker and the bot must share ONLY the job root, and
+  the service insists the workspace is exactly `<WORK_DIR>/<32 hex>`.
+* My own test input once failed because the URL tokenizer (correctly) ends a URL at `<`, `>`, quotes and backticks.
+* I again typed placeholder assertions while writing a test (`... if False else None`) and caught it in review; no test
+  in the repo contains such logic (`grep -rn "if False\|or True" tests app scripts` is empty).
+
+### Still OPEN in Phase 5 (needs the deployed containers, see Phase 6)
+T05.1/T05.2 production enforcement (internal network, non-root, read-only FS, no token/DB in the worker, proxy-only egress),
+T05.4 container-level limits, T05.6 local Bot API cache cleanup, T05.7 backup/retention documentation, T05.8 compose
+restart policy and log rotation.

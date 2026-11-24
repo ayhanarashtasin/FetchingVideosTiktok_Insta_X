@@ -15,6 +15,7 @@ import contextlib
 import logging
 import os
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import timedelta
 
@@ -39,6 +40,7 @@ from app.core.ports import ExtractionBackend
 from app.core.url_validator import parse_hosts_config
 from app.core.worker import JobRunner
 from app.logging_setup import log_event, setup_logging
+from app.services.alerts import AlertMonitor
 from app.services.cleanup import WorkspaceManager
 from app.services.health import Heartbeat, write_heartbeat
 from app.storage.db import Database, PurgeResult
@@ -130,7 +132,15 @@ async def notify_interrupted(bot: Bot, jobs: list[JobRecord]) -> None:
 
 
 async def housekeeping(
-    settings: Settings, db: Database, workspaces: WorkspaceManager, extractor, session: TrackingSession, started: float
+    settings: Settings,
+    db: Database,
+    workspaces: WorkspaceManager,
+    extractor,
+    session: TrackingSession,
+    started: float,
+    *,
+    alerts: AlertMonitor | None = None,
+    failures: Callable[[], int] = lambda: 0,
 ) -> None:
     """Periodic: heartbeat, expiry purge, orphan sweep, disk/worker/poll watchdogs."""
     while True:
@@ -141,6 +151,8 @@ async def housekeeping(
                 log_event(log, logging.INFO, "housekeeping", purged_jobs=purged.jobs, swept_workspaces=len(swept))
             worker_ok = await extractor.health()
             free = workspaces.free_bytes()
+            if alerts is not None:
+                await alerts.check(consecutive_failures=failures(), free_bytes=free)
             poll_age = None if session.last_poll_ok is None else time.monotonic() - session.last_poll_ok
             write_heartbeat(
                 settings.heartbeat_file,
@@ -236,7 +248,29 @@ async def run(
     dp = build_dispatcher(settings, ctx)
 
     started = time.time()
-    hk = asyncio.create_task(housekeeping(settings, db, workspaces, extractor, session, started), name="housekeeping")
+    alerts = (
+        AlertMonitor(
+            bot,
+            settings.allowed_user_ids,
+            failure_threshold=settings.alert_failure_threshold,
+            min_free_bytes=settings.min_free_disk_bytes,
+        )
+        if settings.alerts_enabled
+        else None
+    )
+    hk = asyncio.create_task(
+        housekeeping(
+            settings,
+            db,
+            workspaces,
+            extractor,
+            session,
+            started,
+            alerts=alerts,
+            failures=lambda: runner.consecutive_extraction_failures,
+        ),
+        name="housekeeping",
+    )
     queue.start(runner)
     try:
         await notify_interrupted(bot, report.interrupted)

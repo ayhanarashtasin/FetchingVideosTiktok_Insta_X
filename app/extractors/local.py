@@ -83,6 +83,7 @@ class LocalExtractionBackend:
             mode=request.delivery_mode,
             native_hevc=self.settings.native_hevc,
             runner=self.runner,
+            min_free_bytes=self.settings.min_free_disk_bytes,
         )
         return result.model_copy(update={"assets": assets})
 
