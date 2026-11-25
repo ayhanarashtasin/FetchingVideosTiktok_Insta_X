@@ -12,6 +12,7 @@ and never receives a URL.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import shutil
 
@@ -22,6 +23,7 @@ from app.services.subprocess_runner import ProcessRunner, SubprocessRunner, sani
 
 log = logging.getLogger(__name__)
 DURATION_TOLERANCE = 0.5  # seconds: container rounding only; a bigger gap means something was cut
+REMUX_CONCURRENCY = 2
 
 
 async def remux_to_mp4(
@@ -98,12 +100,13 @@ async def prepare_assets(
         return assets
     # `ffmpeg=None` -> look it up on PATH; an explicit empty string means "FFmpeg is unavailable".
     exe = shutil.which("ffmpeg") if ffmpeg is None else ffmpeg
+    if not exe:
+        return assets
     run = runner or SubprocessRunner()
-    out: list[MediaAsset] = []
-    for asset in assets:
-        wants_remux = (
-            bool(exe)
-            and asset.kind is ItemKind.VIDEO
+
+    def _needs_remux(asset: MediaAsset) -> bool:
+        return (
+            asset.kind is ItemKind.VIDEO
             and not is_native_video(
                 container=asset.container, video_codec=asset.video_codec, audio_codec=asset.audio_codec,
                 pix_fmt=asset.pix_fmt, native_hevc=native_hevc,
@@ -113,12 +116,27 @@ async def prepare_assets(
                 native_hevc=native_hevc,
             )
         )  # fmt: skip
-        if wants_remux:
-            assert exe is not None
+
+    targets = [i for i, a in enumerate(assets) if _needs_remux(a)]
+    if not targets:
+        return assets
+
+    sem = asyncio.Semaphore(min(REMUX_CONCURRENCY, len(targets)))
+
+    async def _one(asset: MediaAsset) -> MediaAsset:
+        async with sem:
             remuxed = await remux_to_mp4(asset, runner=run, ffmpeg=exe, min_free_bytes=min_free_bytes)
             if remuxed is not None:
-                out.append(remuxed)
-                continue
+                return remuxed
             log.info("lossless remux not possible; keeping the original file (will be sent as a document)")
-        out.append(asset)
+            return asset
+
+    out = list(assets)
+    if len(targets) == 1:
+        idx = targets[0]
+        out[idx] = await _one(assets[idx])
+    else:
+        converted = await asyncio.gather(*(_one(assets[idx]) for idx in targets))
+        for idx, asset in zip(targets, converted, strict=True):
+            out[idx] = asset
     return out

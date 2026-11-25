@@ -25,6 +25,44 @@ log = logging.getLogger(__name__)
 JOB_ID_RE = re.compile(r"^[0-9a-f]{32}$")
 
 
+def share_with_group(root: Path, *, keep_private: frozenset[str] = frozenset()) -> int:
+    """Make everything under `root` readable, writable and deletable by the shared group. Returns entries changed.
+
+    The extractor worker and the bot are different uids in one group and exchange job files through one
+    directory. Anything the worker (or a tool it spawned) creates must stay removable by the bot, whatever
+    umask that tool chose; otherwise cleanup fails with PermissionError and workspaces pile up until the
+    disk is full. Group bits only - never world bits - and symlinks are never followed or modified.
+    Names in `keep_private` (e.g. a per-job copy of a session file) are left exactly as they are.
+    """
+    if os.name == "nt":  # no POSIX permission model
+        return 0
+    changed = 0
+    for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
+        for name in [*dirnames, *filenames]:
+            if name in keep_private:
+                continue
+            path = os.path.join(dirpath, name)
+            try:
+                st = os.lstat(path)
+                if stat.S_ISLNK(st.st_mode):
+                    continue
+                want = st.st_mode | (0o070 if stat.S_ISDIR(st.st_mode) else 0o060)
+                if want != st.st_mode:
+                    os.chmod(path, stat.S_IMODE(want))
+                    changed += 1
+            except OSError:
+                continue  # not ours to change (or already gone); the unchanged entry is reported by cleanup
+    with contextlib.suppress(OSError):
+        os.chmod(root, stat.S_IMODE(os.lstat(root).st_mode | 0o070))
+    return changed
+
+
+def relaxed_mode(mode: int) -> int:
+    """Add owner read/write/execute and keep every other bit. A failed delete must never revoke the GROUP's
+    access to a directory: the worker may still need it to clean up the entries it owns."""
+    return stat.S_IMODE(mode) | stat.S_IRWXU
+
+
 class WorkspaceManager:
     def __init__(
         self,
@@ -34,7 +72,8 @@ class WorkspaceManager:
         shared_group: bool = False,
         clock: Callable[[], float] = time.time,
     ) -> None:
-        self.base = Path(base)
+        # Extractors run with the job directory as their cwd and also receive paths inside it.
+        self.base = Path(base).absolute()
         self._orphan_ttl = orphan_ttl.total_seconds()
         # 0o700 by default; 0o770 when the extractor worker (a different uid in the same group)
         # must write into the directory. Never world-accessible.
@@ -104,7 +143,7 @@ class WorkspaceManager:
     def open_validated(self, workspace: Path, candidate: Path | str, *, expected_size: int) -> int:
         """Open a worker-produced file and return a read-only fd that is safe to upload from.
 
-        The extractor worker is untrusted and shares a volume with the bot, so a path that was
+        The extractor shares the work directory with the bot, so a path that was
         valid a moment ago could be swapped for a symlink to one of the BOT's secrets before the
         upload starts. Opening with O_NOFOLLOW and then verifying the *descriptor* (regular file,
         expected size) closes that window: later changes to the path cannot affect the bytes we
@@ -166,7 +205,7 @@ class WorkspaceManager:
         def on_error(func: Callable[..., object], p: str, exc: BaseException) -> None:
             # Read-only files (notably on Windows) block rmtree; relax and retry once.
             with contextlib.suppress(OSError):
-                os.chmod(p, stat.S_IWRITE | stat.S_IREAD | stat.S_IEXEC)
+                os.chmod(p, relaxed_mode(os.lstat(p).st_mode))
                 func(p)
 
         try:
@@ -175,4 +214,9 @@ class WorkspaceManager:
             elif path.exists():
                 shutil.rmtree(path, onexc=on_error)
         except OSError as exc:
-            log.warning("could not remove workspace %s: %s", path.name, type(exc).__name__)
+            # Loud on purpose: a workspace that cannot be removed is a leak that ends in a full disk.
+            log.error(
+                "could not remove workspace %s: %s (check work directory permissions)",
+                path.name,
+                type(exc).__name__,
+            )

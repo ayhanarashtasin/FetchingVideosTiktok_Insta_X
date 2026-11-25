@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import ipaddress
 import socket
 from collections.abc import Awaitable, Callable, Iterable
@@ -20,6 +21,26 @@ from typing import Any
 import aiohttp.abc
 
 from app.core.errors import BotError, ErrorCode
+
+TCP_BUFFER_BYTES = 1 << 20  # 1 MiB (vs Windows' 64 KiB default) for high-RTT uploads/downloads
+
+
+def tune_socket(sock: socket.socket) -> None:
+    """Enable TCP_NODELAY and enlarge send/recv buffers (never shrinking larger OS defaults)."""
+    with contextlib.suppress(OSError):
+        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+    for opt in (socket.SO_SNDBUF, socket.SO_RCVBUF):
+        with contextlib.suppress(OSError):
+            if sock.getsockopt(socket.SOL_SOCKET, opt) < TCP_BUFFER_BYTES:
+                sock.setsockopt(socket.SOL_SOCKET, opt, TCP_BUFFER_BYTES)
+
+
+def tuned_socket_factory(addr_info: tuple[Any, ...]) -> socket.socket:
+    """aiohttp / aiohappyeyeballs socket_factory with TCP_NODELAY and 1 MiB socket buffers."""
+    sock = socket.socket(family=addr_info[0], type=addr_info[1], proto=addr_info[2])
+    tune_socket(sock)
+    return sock
+
 
 IPAddress = ipaddress.IPv4Address | ipaddress.IPv6Address
 

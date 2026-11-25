@@ -14,8 +14,9 @@ from aiogram.filters import Command, CommandStart
 from aiogram.types import Message
 
 from app.bot import messages
+from app.bot.callbacks import trigger_follow_up
 from app.bot.context import AppContext
-from app.bot.keyboards import settings_keyboard
+from app.bot.keyboards import ORIG_CMD_PREFIX, parse_job_callback, settings_keyboard
 from app.bot.messages import FinalReport
 from app.core.contracts import JobState
 from app.core.job_queue import CancelKind, SubmitStatus
@@ -54,6 +55,31 @@ async def cmd_cancel(message: Message, ctx: AppContext, owner_id: int) -> None:
         await ctx.notifier.finish(job, FinalReport(state=JobState.CANCELLED, original_url=job.original_url))
     else:  # RUNNING: the runner reports the final outcome (incl. anything already delivered)
         await message.answer(messages.CANCELLING)
+
+
+async def cmd_original(message: Message, ctx: AppContext, owner_id: int) -> None:
+    raw = (message.text or "").strip().split(maxsplit=1)[0]
+    job_id = parse_job_callback(raw.split("@", 1)[0], ORIG_CMD_PREFIX)
+    outcome = trigger_follow_up(
+        ctx,
+        job_id=job_id,
+        user_id=owner_id,
+        chat_id=message.chat.id,
+        request_key=f"cmd:{message.message_id}",
+        original=True,
+    )
+    if outcome.error_text is not None or outcome.result is None:
+        await message.answer(outcome.error_text or messages.ACTION_EXPIRED)
+        return
+    res = outcome.result
+    if res.status is SubmitStatus.ACCEPTED and res.handle is not None:
+        await ctx.notifier.ack(res.handle.job)
+    elif res.status is SubmitStatus.DUPLICATE:
+        log_event(log, logging.INFO, "duplicate telegram event ignored", message_id=message.message_id)
+    elif res.status is SubmitStatus.USER_BUSY:
+        await message.answer(messages.ALREADY_RUNNING)
+    else:
+        await message.answer(messages.QUEUE_FULL)
 
 
 async def on_text(message: Message, ctx: AppContext, owner_id: int) -> None:
@@ -98,6 +124,7 @@ def create_router() -> Router:
     r.message.register(cmd_help, Command("help"))
     r.message.register(cmd_settings, Command("settings"))
     r.message.register(cmd_cancel, Command("cancel"))
+    r.message.register(cmd_original, F.text.regexp(r"^/orig(?:_|@|$)"))
     r.message.register(on_text, F.text | F.caption)
     r.message.register(on_other)  # catch-all: must stay last
     return r

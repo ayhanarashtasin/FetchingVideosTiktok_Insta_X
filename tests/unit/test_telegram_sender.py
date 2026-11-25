@@ -9,6 +9,7 @@ no replay after an uncertain outcome, cancellation, and safe file-descriptor han
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import os
 import sys
 import uuid
@@ -24,7 +25,8 @@ from aiogram.exceptions import (
     TelegramRetryAfter,
     TelegramServerError,
 )
-from aiogram.methods import GetMe
+from aiogram.methods import GetMe, SendVideo
+from aiogram.types import Video
 
 from app.core.contracts import (
     Completeness,
@@ -41,6 +43,7 @@ from tests.fakes import OWNER, FakeSession, build_test_settings, make_bot
 from tests.helpers import make_job
 
 URL = "https://www.instagram.com/p/ABCdef12345/?igsh=tracking"
+CLEAN_URL = "https://www.instagram.com/p/ABCdef12345/"
 M = GetMe()  # any TelegramMethod works as the "method" of an aiogram exception
 
 
@@ -115,7 +118,7 @@ async def test_single_photo_native_with_exact_url_caption_reply_button_and_exact
     out = await env.deliver()
     (call,) = env.session.calls
     assert type(call).__name__ == "SendPhoto" and call.chat_id == OWNER
-    assert call.caption == f"Original link: {URL}"  # the exact submitted URL, tracking parameter included
+    assert call.caption == f"{CLEAN_URL}\n1080p"  # query stripped + resolution, no extra words
     assert call.reply_parameters.message_id == 42 and call.reply_parameters.allow_sending_without_reply
     (button,) = [b for row in call.reply_markup.inline_keyboard for b in row]
     assert button.text == "Original files" and button.callback_data == f"orig:{env.job.id}"
@@ -134,7 +137,65 @@ async def test_single_video_is_sent_natively_and_streamable(env):  # AT01 / AT04
     (call,) = env.session.calls
     assert type(call).__name__ == "SendVideo"
     assert (call.width, call.height, call.duration, call.supports_streaming) == (1080, 1350, 8, True)
-    assert call.caption == f"Original link: {URL}" and call.reply_markup is not None
+    assert call.caption == f"{CLEAN_URL}\n1080p" and call.reply_markup is None  # no Original files button for videos
+
+
+@pytest.fixture
+async def repeat_video(env, monkeypatch):
+    data = b"source" * 100
+    sha256 = hashlib.sha256(data).hexdigest()
+    make_request = env.session.make_request
+
+    async def confirm_video(bot, method, timeout=None):
+        result = await make_request(bot, method, timeout)
+        if isinstance(method, SendVideo):
+            media = Video(file_id="confirmed-video", file_unique_id="video", width=1080, height=1350, duration=8)
+            return result.model_copy(update={"video": media})
+        return result
+
+    monkeypatch.setattr(env.session, "make_request", confirm_video)
+    env.add(ItemKind.VIDEO, data=data, sha256=sha256)
+    assert (await env.deliver()).confirmed_positions == [0]
+
+    async def send_again(*, content=data, chat_id=OWNER, mode=DeliveryMode.MEDIA, container="mp4"):
+        job, request, _ = make_job(env.db, owner_id=OWNER, chat_id=chat_id, message_id=43, url=URL, mode=mode)
+        env.db.reserve_job(job, max_active_per_user=2)
+        env.job, env.req = job, request
+        env.ws = env.ws_mgr.create(job.id)
+        env.assets.clear()
+        env.add(ItemKind.VIDEO, data=content, sha256=sha256, container=container)
+        return await env.deliver()
+
+    return send_again
+
+
+async def test_repeated_validated_video_reuses_telegram_file_without_uploading_bytes(env, repeat_video):
+    assert (await repeat_video()).confirmed_positions == [0]
+    assert env.methods() == ["SendVideo", "SendVideo"]
+    assert env.session.calls[-1].video == "confirmed-video"
+    assert env.session.calls[-1].reply_parameters.message_id == 43
+    assert len(env.session.uploads) == 1
+
+
+@pytest.mark.parametrize("retry", [False, True])
+async def test_rejected_file_id_only_reuploads_after_a_definite_failure(env, repeat_video, retry):
+    error = TelegramBadRequest(M, "invalid file ID") if retry else TelegramNetworkError(M, "lost response")
+    fail_n(env.session, lambda: error, only="SendVideo")
+    result = await repeat_video()
+    assert env.session.calls[1].video == "confirmed-video"
+    if retry:
+        assert result.confirmed_positions == [0] and not result.unknown_positions
+        assert env.methods() == ["SendVideo"] * 3
+        assert env.session.uploads == [env.session.uploads[0]] * 2
+    else:
+        assert result.unknown_positions == [0] and not result.confirmed_positions
+        assert env.methods() == ["SendVideo"] * 2 and len(env.session.uploads) == 1
+
+
+@pytest.mark.parametrize("kwargs", [{"content": b"edited" * 100}, {"chat_id": 222}, {"container": "mkv"}])
+async def test_file_id_is_bound_to_the_actual_bytes_chat_and_media_type(env, repeat_video, kwargs):
+    assert (await repeat_video(**kwargs)).confirmed_positions == [0]
+    assert len(env.session.uploads) == 2
 
 
 async def test_incompatible_video_goes_as_a_document_not_transcoded(env):  # AT16
@@ -161,16 +222,13 @@ async def test_album_is_one_media_group_with_a_caption_on_the_first_item_and_a_c
     for _ in range(3):
         env.add()
     out = await env.deliver()
-    assert env.methods() == ["SendMediaGroup", "SendMessage"]
-    group, link = env.session.calls
+    assert env.methods() == ["SendMediaGroup"]
+    (group,) = env.session.calls
     assert [type(m).__name__ for m in group.media] == ["InputMediaPhoto"] * 3
-    assert [m.caption for m in group.media] == [f"Original link: {URL}", None, None]
+    assert [m.caption for m in group.media] == [f"{CLEAN_URL}\n1080p\nOriginal files: /orig_{env.job.id}", None, None]
     assert getattr(group, "reply_markup", None) is None  # media groups cannot hold a keyboard
     assert group.reply_parameters.message_id == 42
-    assert link.text == f"Original link: {URL}" and link.chat_id == OWNER
-    (button,) = [b for row in link.reply_markup.inline_keyboard for b in row]
-    assert button.callback_data == f"orig:{env.job.id}"
-    assert out.confirmed_positions == [0, 1, 2] and len(out.telegram_message_ids) == 4  # 3 media + the link
+    assert out.confirmed_positions == [0, 1, 2] and len(out.telegram_message_ids) == 3  # 3 media, no extra message
 
 
 async def test_mixed_album_keeps_item_types_and_order(env):
@@ -192,7 +250,7 @@ async def test_eleven_photos_are_ten_in_a_group_then_one_single_then_the_link(en
     out = await env.deliver()
     assert env.methods() == ["SendMediaGroup", "SendPhoto", "SendMessage"]
     assert len(env.session.calls[0].media) == 10
-    assert env.session.calls[1].caption == f"Original link: {URL}"  # every batch is captioned
+    assert env.session.calls[1].caption == f"{CLEAN_URL}\n1080p"  # every batch is captioned
     assert env.session.calls[1].reply_markup is None  # the button lives on the final link message
     assert env.session.calls[1].reply_parameters is None  # only the FIRST send replies to the request
     assert out.confirmed_positions == list(range(11))
@@ -209,19 +267,19 @@ async def test_original_mode_albums_are_document_groups(tmp_path):
     group = e.session.calls[0]
     assert [type(m).__name__ for m in group.media] == ["InputMediaDocument"] * 3
     assert all(m.disable_content_type_detection for m in group.media)
-    assert e.session.calls[-1].reply_markup is None  # no "Original files" button in original mode
+    assert getattr(e.session.calls[-1], "reply_markup", None) is None  # no "Original files" button in original mode
     e.db.close()
 
 
 async def test_a_long_url_is_never_truncated_it_gets_its_own_message(env):
-    long_url = "https://x.com/someuser/status/1700000000000?" + "a=1&" * 300
+    long_url = "https://x.com/someuser/status/" + "1" * 1100
     env.job = env.job.model_copy(update={"original_url": long_url})
     env.db._conn.execute("UPDATE jobs SET original_url = ? WHERE id = ?", (long_url, env.job.id))
     env.add()
     await env.deliver()
     photo, link = env.session.calls
     assert photo.caption is None
-    assert link.text == f"Original link: {long_url}"
+    assert link.text == f"{long_url}\n1080p"
 
 
 # ===================================================================================== partial / rejected
@@ -355,11 +413,11 @@ async def test_a_blocked_bot_stops_everything(env):
 
 
 async def test_failure_of_the_closing_link_message_does_not_change_the_outcome(env):
-    for _ in range(3):
+    for _ in range(11):
         env.add()
     fail_n(env.session, lambda: TelegramNetworkError(M, "boom"), times=99, only="SendMessage")
     out = await env.deliver()
-    assert out.confirmed_positions == [0, 1, 2] and out.completeness is Completeness.COMPLETE
+    assert out.confirmed_positions == list(range(11)) and out.completeness is Completeness.COMPLETE
 
 
 async def test_cancellation_during_a_send_is_recorded_as_unknown_and_propagates(env):

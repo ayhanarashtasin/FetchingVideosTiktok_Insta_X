@@ -130,8 +130,8 @@ never trust a missing `num`.
 ## 4. Licences and dependency policy (T01.7)
 
 * **gallery-dl is GPL-2.0-only.** It is invoked **only as a subprocess** and never imported, so the
-  project's own code is not a derivative work. If the Docker image is ever distributed, the GPL
-  obligations for that component (source offer) apply to the image. Private self-hosted use has none.
+  project's own code is not a derivative work. If a bundled release containing gallery-dl is ever distributed, the GPL
+  obligations for that component (source offer) apply to that distribution. Private self-hosted use has none.
 * yt-dlp is the Unlicense (public domain-style). aiogram, pydantic, pydantic-settings: MIT.
   aiohttp: Apache-2.0 AND MIT.
 * Both extractors are pinned **exactly** in `pyproject.toml`, locked in `uv.lock` and exported with

@@ -7,6 +7,7 @@ sent, never silently swapped); only if NOTHING usable remains does the job fail.
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 
 from app.core.contracts import (
@@ -17,9 +18,11 @@ from app.core.contracts import (
     derive_completeness,
 )
 from app.core.errors import BotError, ErrorCode
-from app.extractors.base import FetchOutcome
-from app.media.probe import probe_file
+from app.extractors.base import FetchedItem, FetchOutcome
+from app.media.probe import ProbeInfo, probe_file
 from app.services.subprocess_runner import ProcessRunner
+
+PROBE_CONCURRENCY = 4
 
 
 async def finalize_outcome(
@@ -35,13 +38,33 @@ async def finalize_outcome(
         raise BotError(ErrorCode.LIMIT_EXCEEDED, "too many items")
     omissions: list[ItemFailure] = list(outcome.omissions)
     assets: list[MediaAsset] = []
+    ordered = sorted(outcome.items, key=lambda i: i.position)
+
+    async def _probe_one(item: FetchedItem, sem: asyncio.Semaphore) -> ProbeInfo | BotError:
+        async with sem:
+            try:
+                return await probe_file(item.path, runner=runner)
+            except BotError as err:
+                if err.code is ErrorCode.DOWNLOAD_TIMEOUT:
+                    raise  # the probe itself timed out: retry the attempt, do not blame the media
+                return err
+
+    if len(ordered) <= 1:
+        probed_results: list[ProbeInfo | BotError] = []
+        for item in ordered:
+            try:
+                probed_results.append(await probe_file(item.path, runner=runner))
+            except BotError as err:
+                if err.code is ErrorCode.DOWNLOAD_TIMEOUT:
+                    raise
+                probed_results.append(err)
+    else:
+        sem = asyncio.Semaphore(min(PROBE_CONCURRENCY, len(ordered)))
+        probed_results = list(await asyncio.gather(*(_probe_one(item, sem) for item in ordered)))
+
     total = 0
-    for item in sorted(outcome.items, key=lambda i: i.position):
-        try:
-            info = await probe_file(item.path, runner=runner)
-        except BotError as err:
-            if err.code is ErrorCode.DOWNLOAD_TIMEOUT:
-                raise  # the probe itself timed out: retry the attempt, do not blame the media
+    for item, res in zip(ordered, probed_results, strict=True):
+        if isinstance(res, BotError):
             omissions.append(
                 ItemFailure(
                     position=item.position,
@@ -51,6 +74,7 @@ async def finalize_outcome(
                 )
             )
             continue
+        info = res
         if info.kind is not item.kind:
             omissions.append(
                 ItemFailure(
@@ -82,6 +106,7 @@ async def finalize_outcome(
                 processing=item.processing,
                 container=info.container,
                 pix_fmt=info.pix_fmt,
+                quality_note=item.quality_note,
             )
         )
     if not assets:

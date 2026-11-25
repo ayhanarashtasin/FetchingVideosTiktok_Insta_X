@@ -1,8 +1,7 @@
 """In-process extraction backend (T03.1): resolver + adapters + finalize behind the ExtractionBackend port.
 
-In production the SAME class runs inside the isolated worker service (`app.extractors.service`), and
-the bot talks to it through `RemoteExtractionBackend`. Run directly in the bot's process (development
-only) it is NOT isolated from the bot's environment.
+Runs directly in the bot's process by default (`WORKER_MODE=inprocess`), or behind the optional
+separate worker service (`app.extractors.service`, `WORKER_MODE=remote`) via `RemoteExtractionBackend`.
 """
 
 from __future__ import annotations
@@ -14,6 +13,7 @@ from app.core.contracts import ExtractionRequest, ExtractionResult, Platform, Po
 from app.core.deadline import Deadline
 from app.core.url_validator import ValidatedUrl, parse_hosts_config
 from app.extractors.base import ExtractionContext, PlatformAdapter
+from app.extractors.direct_download import DirectMediaDownloader
 from app.extractors.finalize import finalize_outcome
 from app.extractors.gallerydl_runner import GalleryDlRunner
 from app.extractors.resolver import ShortLinkResolver
@@ -31,11 +31,27 @@ class LocalExtractionBackend:
         runner: ProcessRunner | None = None,
         resolver: ShortLinkResolver | None = None,
         adapters: dict[Platform, PlatformAdapter] | None = None,
+        downloader: DirectMediaDownloader | None = None,
     ) -> None:
         self.settings = settings
         self.runner: ProcessRunner = runner or SubprocessRunner()
         proxy = settings.egress_proxy_url
         cookies = settings.instagram_cookies_file
+        # Enable direct CDN download when running real tools (or when explicitly injected);
+        # offline tests injecting a FakeToolRunner keep deterministic subprocess playback.
+        self.downloader: DirectMediaDownloader | None = (
+            downloader
+            if downloader is not None
+            else (
+                DirectMediaDownloader(
+                    proxy=proxy,
+                    max_bytes=settings.max_temp_bytes_per_job,
+                    min_free_bytes=settings.min_free_disk_bytes,
+                )
+                if runner is None
+                else None
+            )
+        )
         ctx = ExtractionContext(
             ytdlp=YtDlpRunner(
                 self.runner,
@@ -53,6 +69,8 @@ class LocalExtractionBackend:
                 min_free_bytes=settings.min_free_disk_bytes,
             ),
             max_items=settings.max_items_per_job,
+            downloader=self.downloader,
+            file_cap_bytes=settings.file_cap_bytes,
         )
         self.adapters = adapters or build_adapters(ctx)
         self.resolver = resolver or ShortLinkResolver(
@@ -92,3 +110,5 @@ class LocalExtractionBackend:
 
     async def aclose(self) -> None:
         await self.resolver.aclose()
+        if self.downloader is not None:
+            await self.downloader.aclose()

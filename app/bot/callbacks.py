@@ -9,6 +9,7 @@ unique key, so it can never start a second job or deliver anything twice.
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from datetime import datetime
 
 from aiogram import F, Router
@@ -25,7 +26,7 @@ from app.bot.keyboards import (
 )
 from app.core.contracts import DeliveryMode, JobRecord, JobState
 from app.core.errors import BotError, ErrorCode
-from app.core.job_queue import SubmitStatus
+from app.core.job_queue import SubmitResult, SubmitStatus
 from app.core.url_validator import validate_url
 from app.logging_setup import log_event
 from app.storage.db import Database, parse_iso, utcnow
@@ -97,38 +98,68 @@ async def on_unknown(cq: CallbackQuery) -> None:
     await _answer(cq, messages.ACTION_EXPIRED)
 
 
-async def _follow_up(cq: CallbackQuery, ctx: AppContext, owner_id: int, *, prefix: str, original: bool) -> None:
-    job_id = parse_job_callback(cq.data, prefix)
-    if job_id is None or cq.message is None:
-        await _answer(cq, messages.ACTION_EXPIRED)
-        return
+@dataclass(frozen=True)
+class FollowUpOutcome:
+    result: SubmitResult | None = None
+    error_text: str | None = None
+    alert: bool = False
+
+
+def trigger_follow_up(
+    ctx: AppContext,
+    *,
+    job_id: str | None,
+    user_id: int,
+    chat_id: int,
+    request_key: str,
+    original: bool,
+) -> FollowUpOutcome:
+    """Validate and enqueue a follow-up Original-files or Retry job for a button or /orig_ command."""
+    if job_id is None:
+        return FollowUpOutcome(error_text=messages.ACTION_EXPIRED)
     try:
-        job = authorize_job_callback(ctx.db, job_id, user_id=owner_id, chat_id=cq.message.chat.id)
+        job = authorize_job_callback(ctx.db, job_id, user_id=user_id, chat_id=chat_id)
     except BotError as err:
         text = messages.ACTION_NOT_ALLOWED if err.code is ErrorCode.UNAUTHORIZED else messages.ACTION_EXPIRED
-        await _answer(cq, text, alert=err.code is ErrorCode.UNAUTHORIZED)
-        return
+        return FollowUpOutcome(error_text=text, alert=err.code is ErrorCode.UNAUTHORIZED)
 
     eligible = (job.state in _ORIGINAL_ELIGIBLE) if original else retry_allowed(job)
     if not eligible:
-        await _answer(cq, messages.NOT_RETRYABLE, alert=True)
-        return
+        return FollowUpOutcome(error_text=messages.NOT_RETRYABLE, alert=True)
     try:
         validated = validate_url(job.original_url, extra_hosts=ctx.extra_hosts)  # never trust stored data blindly
     except BotError:
-        await _answer(cq, messages.ACTION_EXPIRED)
-        return
+        return FollowUpOutcome(error_text=messages.ACTION_EXPIRED)
 
     mode = DeliveryMode.ORIGINAL if original else job.delivery_mode
     result = ctx.enqueue(
-        owner_id=owner_id,
+        owner_id=user_id,
         chat_id=job.chat_id,
         origin_message_id=job.origin_message_id,
         validated=validated,
         mode=mode,
-        request_key=cq.id,  # fresh logical request id; a re-delivered callback becomes DUPLICATE
+        request_key=request_key,
         parent_job_id=job.id,
     )
+    return FollowUpOutcome(result=result)
+
+
+async def _follow_up(cq: CallbackQuery, ctx: AppContext, owner_id: int, *, prefix: str, original: bool) -> None:
+    if cq.message is None:
+        await _answer(cq, messages.ACTION_EXPIRED)
+        return
+    outcome = trigger_follow_up(
+        ctx,
+        job_id=parse_job_callback(cq.data, prefix),
+        user_id=owner_id,
+        chat_id=cq.message.chat.id,
+        request_key=cq.id,  # fresh logical request id; a re-delivered callback becomes DUPLICATE
+        original=original,
+    )
+    if outcome.error_text is not None or outcome.result is None:
+        await _answer(cq, outcome.error_text or messages.ACTION_EXPIRED, alert=outcome.alert)
+        return
+    result = outcome.result
     if result.status is SubmitStatus.ACCEPTED and result.handle is not None:
         await _answer(cq, "Fetching original files..." if original else "Retrying...")
         await ctx.notifier.ack(result.handle.job)

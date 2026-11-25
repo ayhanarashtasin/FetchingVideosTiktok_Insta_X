@@ -1,4 +1,4 @@
-"""Container health check: `python -m app.healthcheck` (exit 0 = healthy, 1 = unhealthy).
+"""Process health check: `python -m app.healthcheck` (exit 0 = healthy, 1 = unhealthy).
 
 Reads only the heartbeat file; it never contacts Telegram, so the check itself cannot leak or
 rate-limit anything.

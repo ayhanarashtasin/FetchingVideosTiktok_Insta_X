@@ -1,8 +1,8 @@
 """Heartbeat + health evaluation (T05.8).
 
-The running bot rewrites a small JSON heartbeat file every few seconds. `app.healthcheck` (the
-Docker HEALTHCHECK) reads it and fails when the event loop is frozen, polling has stalled, the
-database is not writable, disk headroom is gone, or the worker is unreachable.
+The running bot rewrites a small JSON heartbeat file every few seconds. `app.healthcheck` reads it
+and fails when the event loop is frozen, polling has stalled, the database is not writable, disk
+headroom is gone, or the worker is unreachable.
 """
 
 from __future__ import annotations

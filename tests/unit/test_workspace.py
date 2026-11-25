@@ -186,3 +186,13 @@ def test_periodic_sweep_spares_active_jobs_and_young_dirs(ws):
 
 def test_free_bytes_is_reported(ws):
     assert ws.free_bytes() > 0
+
+
+def test_relaxing_a_stubborn_entry_never_removes_group_access():
+    """A failed delete used to chmod the directory to owner-only, locking the other uid out of its own files."""
+    from app.services.cleanup import relaxed_mode
+
+    assert relaxed_mode(0o2770) == 0o2770  # nothing to relax; the setgid bit that keeps the group is preserved
+    assert relaxed_mode(0o070) == 0o770  # an unwritable-by-owner entry becomes owner-rwx, group untouched
+    assert relaxed_mode(0o444) == 0o744  # a read-only file becomes writable by its owner only
+    assert relaxed_mode(0o550) & 0o070 == 0o050  # group bits are never changed, only the owner's are raised

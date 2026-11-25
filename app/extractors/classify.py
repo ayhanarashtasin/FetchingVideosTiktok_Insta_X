@@ -21,16 +21,30 @@ from app.core.errors import BotError, ErrorCode
 from app.logging_setup import redact
 
 _I = re.IGNORECASE
+_LOG_NOISE = re.compile(r"^\s*\[[\w-]+\]\[(?:info|debug)\].*$", re.MULTILINE | re.IGNORECASE)
+
+
+def strip_log_noise(text: str) -> str:
+    """Strip informational and debug log lines (e.g. `[tiktok][info] ...`, `[twitter][info] ...`)."""
+    return _LOG_NOISE.sub("", text).strip()
+
 
 # (pattern, code, reason) - first match wins. Order matters: auth/private before "unavailable".
 _TEXT_RULES: tuple[tuple[re.Pattern[str], ErrorCode, str | None], ...] = (
     (re.compile(r"larger than max-?filesize|file is larger than", _I), ErrorCode.LIMIT_EXCEEDED, "filesize"),
     (
         re.compile(
-            r"captcha|challenge|verify you are human|are you a robot|unusual traffic|confirm you.re not a bot", _I
+            r"captcha|failed to solve.*challenge|security challenge|challenge required|"
+            r"verify you are human|are you a robot|unusual traffic|confirm you.re not a bot",
+            _I,
         ),
         ErrorCode.RATE_LIMITED,
         "challenge",
+    ),
+    (
+        re.compile(r"blocked from accessing|ip (?:address )?is blocked|ip block", _I),
+        ErrorCode.RATE_LIMITED,
+        None,
     ),
     (
         re.compile(r"\blog[ -]?in\b|sign[ -]?in|logged.?in|--cookies|account credentials|authentication", _I),
@@ -60,7 +74,7 @@ _TEXT_RULES: tuple[tuple[re.Pattern[str], ErrorCode, str | None], ...] = (
     ),
     (
         re.compile(
-            r"(?<!\d)404(?!\d)|(?<!\d)410(?!\d)|not found|unavailable|removed|deleted|does not exist|"
+            r"(?<!\d)404(?!\d)|(?<!\d)410(?!\d)|not found|unavailable|not available|removed|deleted|does not exist|"
             r"no longer available|expired|could not be found",
             _I,
         ),
@@ -95,16 +109,18 @@ def _detail(text: str) -> str:
 
 def classify_text(text: str, *, session_supported: bool = False, hint: str | None = None) -> BotError:
     """Classify free-form extractor text. `hint` is the post kind ('story', 'reel', ...)."""
+    cleaned = strip_log_noise(text)
+    target = cleaned if cleaned else text
     for pattern, code, reason in _TEXT_RULES:
-        if pattern.search(text):
+        if pattern.search(target):
             if code is ErrorCode.AUTH_REQUIRED:
                 if not session_supported:
                     # Platforms where this project never uses a session: content that needs a login is,
                     # for our purposes, not permitted public content.
-                    return BotError(ErrorCode.ACCESS_RESTRICTED, _detail(text), reason="login_wall")
-                return BotError(code, _detail(text), reason="story" if hint == "story" else None)
-            return BotError(code, _detail(text), reason=reason)
-    return BotError(ErrorCode.EXTRACTOR_CHANGED, _detail(text) or "unclassified extractor failure")
+                    return BotError(ErrorCode.ACCESS_RESTRICTED, _detail(target), reason="login_wall")
+                return BotError(code, _detail(target), reason="story" if hint == "story" else None)
+            return BotError(code, _detail(target), reason=reason)
+    return BotError(ErrorCode.EXTRACTOR_CHANGED, _detail(target) or "unclassified extractor failure")
 
 
 def classify_ytdlp(

@@ -34,10 +34,9 @@ asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 pythonpath = ["."]
 testpaths = ["tests"]
-addopts = "-ra -m 'not live and not docker'"
+addopts = "-ra -m 'not live'"
 markers = [
     "live: opt-in tests against real platforms/Telegram using the private corpus (never run by default)",
-    "docker: tests that need a running Docker daemon (never run by default)",
     "posix: tests that only make sense on Linux/macOS",
 ]
 filterwarnings = [

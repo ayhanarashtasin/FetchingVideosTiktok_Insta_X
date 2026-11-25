@@ -3,7 +3,7 @@
 Two layers of checking:
 
 * Field validators enforce types and sane ranges whenever `Settings` is constructed.
-* `Settings.validate_for_startup()` enforces *readiness* rules (real token, non-empty allowlist,
+* `Settings.validate_for_startup()` enforces *readiness* rules (real token, configured access,
   private-chat-only, safe size ceilings). The process entry point calls it and refuses to start
   on `ConfigError`. Keeping it separate lets tests build partial settings.
 """
@@ -78,11 +78,12 @@ class Settings(BaseSettings):
     bot_token: SecretStr = SecretStr("")
     bot_token_file: Path | None = None
     allowed_user_ids: Annotated[list[int], NoDecode] = Field(default_factory=list)
+    public_access: bool = False
     private_chat_only: bool = True
 
     # --- Telegram API profile --------------------------------------------------------
     bot_api_mode: Literal["hosted", "local"] = "hosted"
-    local_bot_api_url: str = "http://telegram-bot-api:8081"
+    local_bot_api_url: str = "http://127.0.0.1:8081"
 
     # --- delivery / queue ------------------------------------------------------------
     default_delivery_mode: DeliveryMode = DeliveryMode.MEDIA
@@ -116,10 +117,10 @@ class Settings(BaseSettings):
 
     # --- extractor worker boundary ---------------------------------------------------
     worker_mode: Literal["inprocess", "remote"] = "inprocess"
-    worker_url: str = "http://extractor-worker:8090"
+    worker_url: str = "http://127.0.0.1:8090"
     worker_secret: SecretStr = SecretStr("")
     worker_secret_file: Path | None = None
-    worker_host: str = "0.0.0.0"  # noqa: S104 - bound inside the private compose network only
+    worker_host: str = "127.0.0.1"
     worker_port: Annotated[int, Field(ge=1, le=65535)] = 8090
     egress_proxy_url: str | None = None
     extra_allowed_hosts: Annotated[list[str], NoDecode] = Field(default_factory=list)
@@ -202,10 +203,10 @@ class Settings(BaseSettings):
         elif not _TOKEN_RE.match(token):
             problems.append("BOT_TOKEN does not look like a Telegram bot token")
 
-        if prod and not self.allowed_user_ids:
-            problems.append("ALLOWED_USER_IDS must list at least one numeric user id in production")
-        if prod and not self.private_chat_only:
-            problems.append("PRIVATE_CHAT_ONLY must stay true in production")
+        if prod and not self.public_access and not self.allowed_user_ids:
+            problems.append("Production requires at least one numeric ALLOWED_USER_IDS entry or PUBLIC_ACCESS=true")
+        if (prod or self.public_access) and not self.private_chat_only:
+            problems.append("PRIVATE_CHAT_ONLY must be true in production and whenever public access is enabled")
 
         if self.hosted_photo_max_bytes > TELEGRAM_HOSTED_PHOTO_CEILING:
             problems.append("HOSTED_PHOTO_MAX_BYTES exceeds Telegram's 10 MB photo limit")
@@ -227,11 +228,6 @@ class Settings(BaseSettings):
                 problems.append(str(exc))
             if len(secret) < 24 or secret.lower() in _PLACEHOLDERS:
                 problems.append("WORKER_SECRET(_FILE) must be a random value of at least 24 characters")
-        elif prod:
-            problems.append(
-                "WORKER_MODE=inprocess shares the bot's environment and is NOT isolated; "
-                "use WORKER_MODE=remote in production"
-            )
 
         if problems:
             raise ConfigError("; ".join(problems))

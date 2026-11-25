@@ -79,39 +79,112 @@ def _safe(f: FormatDescriptor) -> bool:
 
 def select_format(formats: list[FormatDescriptor]) -> FormatChoice:
     """Pick the best source representation. Raises EXTRACTOR_CHANGED if nothing playable exists."""
+    return ranked_choices(formats)[0]
+
+
+def ranked_choices(formats: list[FormatDescriptor]) -> list[FormatChoice]:
+    """All playable representations ranked strictly best-to-worst (resolution, codec compat, bitrate).
+
+    Element 0 is identical to `select_format(formats)`. Subsequent entries let the worker fall back
+    to the highest source variant that fits under Telegram's upload cap without re-encoding.
+    """
     indexed = list(enumerate(formats))
     muxed = [(i, f) for i, f in indexed if f.has_video and f.has_audio and (f.vcodec or "") != "none"]
     video_only = [(i, f) for i, f in indexed if f.has_video and not f.has_audio]
     audio_only = [(i, f) for i, f in indexed if f.has_audio and not f.has_video]
 
-    best_muxed = max(muxed, key=lambda p: _video_key(p[1], p[0]), default=None)
-    best_video = max(video_only, key=lambda p: _video_key(p[1], p[0]), default=None)
     best_audio = max(audio_only, key=lambda p: _audio_key(p[1], p[0]), default=None)
 
-    use_merge = False
-    if best_video is not None and best_audio is not None:
-        if best_muxed is None:
-            use_merge = True
-        else:
-            vm, mm = _video_key(best_video[1], best_video[0]), _video_key(best_muxed[1], best_muxed[0])
-            if vm[0] > mm[0]:  # strictly more pixels: worth a merge
-                use_merge = True
-            elif vm[0] == mm[0]:
-                v_tbr, m_tbr = best_video[1].tbr or 0.0, best_muxed[1].tbr or 0.0
-                use_merge = v_tbr > m_tbr * 1.15 and m_tbr > 0  # clearly better bitrate at equal resolution
+    # Build candidates with their sort key. At equal resolution, a muxed stream stays ahead of a
+    # separate-track merge unless the video-only track has >15% higher bitrate (matching select_format).
+    muxed_by_pixels: dict[int, float] = {}
+    for _i, f in muxed:
+        px = _pixels(f)
+        muxed_by_pixels[px] = max(muxed_by_pixels.get(px, 0.0), f.tbr or 0.0)
 
-    if use_merge and best_video and best_audio:
-        v, a = best_video[1], best_audio[1]
-        if _safe(v) and _safe(a):
-            return FormatChoice(f"{v.format_id}+{a.format_id}", v, a, merge=True)
-        return FormatChoice(FALLBACK_SELECTOR, v, a, merge=True)
-    if best_muxed is not None:
-        m = best_muxed[1]
-        return FormatChoice(m.format_id if _safe(m) else FALLBACK_SELECTOR, m, None, merge=False)
-    if best_video is not None:  # a source with no audio track at all: keep it as is
-        v = best_video[1]
-        return FormatChoice(v.format_id if _safe(v) else FALLBACK_SELECTOR, v, None, merge=False)
-    raise BotError(ErrorCode.EXTRACTOR_CHANGED, "no playable video format offered", reason="no_video")
+    candidates: list[tuple[tuple[int, int, int, float, int], FormatChoice]] = []
+    for i, m in muxed:
+        vk = _video_key(m, i)
+        # priority=1 beats equal-resolution merge unless merge clears the 1.15x bitrate bar (priority=2)
+        key = (vk[0], 1, vk[1], vk[2], vk[3])
+        choice = FormatChoice(m.format_id if _safe(m) else FALLBACK_SELECTOR, m, None, merge=False)
+        candidates.append((key, choice))
+
+    for i, v in video_only:
+        vk = _video_key(v, i)
+        if best_audio is not None:
+            a = best_audio[1]
+            m_tbr = muxed_by_pixels.get(vk[0], 0.0)
+            v_tbr = v.tbr or 0.0
+            beats_muxed = (vk[0] not in muxed_by_pixels) or (m_tbr > 0 and v_tbr > m_tbr * 1.15)
+            prio = 2 if beats_muxed else 0
+            key = (vk[0], prio, vk[1], vk[2], vk[3])
+            selector = f"{v.format_id}+{a.format_id}" if (_safe(v) and _safe(a)) else FALLBACK_SELECTOR
+            candidates.append((key, FormatChoice(selector, v, a, merge=True)))
+        else:
+            key = (vk[0], 1, vk[1], vk[2], vk[3])
+            choice = FormatChoice(v.format_id if _safe(v) else FALLBACK_SELECTOR, v, None, merge=False)
+            candidates.append((key, choice))
+
+    if not candidates:
+        raise BotError(ErrorCode.EXTRACTOR_CHANGED, "no playable video format offered", reason="no_video")
+
+    candidates.sort(key=lambda item: item[0], reverse=True)
+    # Deduplicate identical selectors while preserving best-to-worst order.
+    seen: set[str] = set()
+    ordered: list[FormatChoice] = []
+    for _k, choice in candidates:
+        sig = f"{choice.selector}:{choice.video.format_id if choice.video else ''}"
+        if sig not in seen:
+            seen.add(sig)
+            ordered.append(choice)
+    return ordered
+
+
+def exact_choice_bytes(choice: FormatChoice) -> int | None:
+    """Exact byte size when reported by the extractor; None when unknown."""
+    if choice.video is None or choice.video.filesize is None:
+        return None
+    if choice.merge and choice.audio is not None:
+        if choice.audio.filesize is None:
+            return None
+        return choice.video.filesize + choice.audio.filesize
+    return choice.video.filesize
+
+
+def estimated_choice_bytes(choice: FormatChoice, duration_seconds: float | None = None) -> int | None:
+    """Known filesize, or bitrate * duration estimate when exact filesize is unavailable."""
+    exact = exact_choice_bytes(choice)
+    if exact is not None:
+        return exact
+    if not duration_seconds or duration_seconds <= 0 or choice.video is None or not choice.video.tbr:
+        return None
+    kbps = choice.video.tbr + (choice.audio.tbr or 0.0 if choice.merge and choice.audio else 0.0)
+    return int((kbps * 1000.0 / 8.0) * duration_seconds * 1.03)
+
+
+def resolution_label(fmt: FormatDescriptor | None) -> str | None:
+    if fmt is None:
+        return None
+    if fmt.width and fmt.height:
+        return f"{min(fmt.width, fmt.height)}p"
+    if fmt.height:
+        return f"{fmt.height}p"
+    return None
+
+
+def format_quality_note(chosen: FormatChoice, top: FormatChoice | None, max_bytes: int) -> str:
+    """Short user-facing caption note explaining why a smaller source variant was sent."""
+    cap_mb = max(1, max_bytes // 1_000_000)
+    chosen_res = resolution_label(chosen.video)
+    top_res = resolution_label(top.video) if top is not None else None
+    if chosen_res and top_res and chosen_res != top_res:
+        return f"Sent {chosen_res} ({top_res} source exceeded {cap_mb} MB Telegram limit)"
+    if chosen_res and top_res and chosen_res == top_res:
+        return f"Sent lower-bitrate {chosen_res} (original exceeded {cap_mb} MB Telegram limit)"
+    if chosen_res:
+        return f"Sent {chosen_res} (original exceeded {cap_mb} MB Telegram limit)"
+    return f"Sent smaller variant (original exceeded {cap_mb} MB Telegram limit)"
 
 
 def is_native_video(

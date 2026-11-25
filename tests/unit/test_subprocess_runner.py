@@ -56,7 +56,7 @@ async def test_arguments_are_never_interpreted_by_a_shell(ws):
 async def test_child_environment_is_isolated_from_the_bots_secrets(ws, monkeypatch):
     monkeypatch.setenv("BOT_TOKEN", "123456789:SECRET-SHOULD-NOT-LEAK")
     monkeypatch.setenv("WORKER_SECRET", "also-secret")
-    monkeypatch.setenv("INSTAGRAM_COOKIES_FILE", "/run/secrets/cookies")
+    monkeypatch.setenv("INSTAGRAM_COOKIES_FILE", "secrets/cookies.txt")
     monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "nope")
     r = await run(ws, "import os, json; print(json.dumps(dict(os.environ)))")
     import json
@@ -73,8 +73,8 @@ async def test_child_environment_is_isolated_from_the_bots_secrets(ws, monkeypat
 
 def test_proxy_variables_only_when_configured(ws):
     assert "HTTPS_PROXY" not in sanitized_env(ws)
-    env = sanitized_env(ws, proxy="http://egress-proxy:3128")
-    assert env["HTTPS_PROXY"] == env["https_proxy"] == env["HTTP_PROXY"] == "http://egress-proxy:3128"
+    env = sanitized_env(ws, proxy="http://127.0.0.1:3128")
+    assert env["HTTPS_PROXY"] == env["https_proxy"] == env["HTTP_PROXY"] == "http://127.0.0.1:3128"
     assert env["NO_PROXY"] == ""  # nothing may bypass the proxy
 
 

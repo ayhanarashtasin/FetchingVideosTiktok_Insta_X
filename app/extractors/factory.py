@@ -8,9 +8,9 @@ from app.core.ports import ExtractionBackend
 
 def build_extraction_backend(settings: Settings) -> ExtractionBackend:
     if settings.worker_mode == "remote":
-        from app.extractors.remote import RemoteExtractionBackend  # isolated worker over the network
+        from app.extractors.remote import RemoteExtractionBackend  # optional separate worker over HTTP
 
         return RemoteExtractionBackend(settings)
-    from app.extractors.local import LocalExtractionBackend  # development: runs in this process
+    from app.extractors.local import LocalExtractionBackend  # default: runs in-process
 
     return LocalExtractionBackend(settings)

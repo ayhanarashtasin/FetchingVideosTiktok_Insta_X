@@ -2,8 +2,9 @@
 
     python -m app.services.egress_proxy        # EGRESS_ALLOWED_SUFFIXES, EGRESS_LISTEN_HOST/PORT
 
-The worker container sits on an `internal: true` network with no route to the internet; its tools are pointed
-at this proxy (HTTPS_PROXY / --proxy). For each `CONNECT host:port` the proxy:
+An optional allowlisting proxy for extractor tools pointed at it via `HTTPS_PROXY` / `--proxy`
+(e.g. a separate worker process with restricted outbound networking). For each `CONNECT host:port`
+the proxy:
 
 1. accepts only CONNECT to port 443 (plain-HTTP proxying is refused);
 2. refuses IP literals and any hostname that is not EXACTLY an allowed domain or a proper subdomain of one
@@ -28,10 +29,11 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 
 from app.core.errors import BotError
-from app.core.net_guard import Resolver, host_matches, is_ip_literal, resolve_public
+from app.core.net_guard import Resolver, host_matches, is_ip_literal, resolve_public, tune_socket
 from app.logging_setup import log_event, setup_logging
 
 log = logging.getLogger("app.egress")
+RELAY_CHUNK_BYTES = 262_144
 
 DEFAULT_ALLOWED_SUFFIXES: tuple[str, ...] = (
     # TikTok (pages, API, media CDNs)
@@ -160,6 +162,10 @@ class EgressProxy:
             await self._deny(writer, 502, "upstream_unreachable", host=host)
             return
         up_reader, up_writer = upstream
+        for w in (writer, up_writer):
+            sock = w.get_extra_info("socket")
+            if sock is not None:
+                tune_socket(sock)
         self.stats.allowed += 1
         log_event(log, logging.DEBUG, "egress allowed", host=host)
         writer.write(b"HTTP/1.1 200 Connection Established\r\n\r\n")
@@ -184,7 +190,7 @@ class EgressProxy:
         async def pump(src: asyncio.StreamReader, dst: asyncio.StreamWriter) -> None:
             try:
                 while True:
-                    data = await asyncio.wait_for(src.read(65536), self._idle)
+                    data = await asyncio.wait_for(src.read(RELAY_CHUNK_BYTES), self._idle)
                     if not data:
                         break
                     dst.write(data)
@@ -216,6 +222,10 @@ class EgressProxy:
         await self._reply(writer, status, "Forbidden" if status == 403 else "Error")
 
 
+DEFAULT_LISTEN_HOST = "127.0.0.1"
+DEFAULT_LISTEN_PORT = 3128
+
+
 def _suffixes_from_env() -> tuple[str, ...]:
     raw = os.environ.get("EGRESS_ALLOWED_SUFFIXES", "").strip()
     return tuple(s.strip().lower() for s in raw.split(",") if s.strip()) or DEFAULT_ALLOWED_SUFFIXES
@@ -224,7 +234,8 @@ def _suffixes_from_env() -> tuple[str, ...]:
 async def _amain() -> None:
     setup_logging(os.environ.get("LOG_LEVEL", "INFO"))
     proxy = EgressProxy(EgressPolicy(suffixes=_suffixes_from_env()))
-    host, port = os.environ.get("EGRESS_LISTEN_HOST", "0.0.0.0"), int(os.environ.get("EGRESS_LISTEN_PORT", "3128"))  # noqa: S104
+    host = os.environ.get("EGRESS_LISTEN_HOST", DEFAULT_LISTEN_HOST)
+    port = int(os.environ.get("EGRESS_LISTEN_PORT", str(DEFAULT_LISTEN_PORT)))
     server = await proxy.start(host, port)
     log_event(log, logging.INFO, "egress proxy listening", port=port, suffixes=len(proxy.policy.suffixes))
     async with server:
@@ -232,7 +243,8 @@ async def _amain() -> None:
 
 
 def main() -> None:
-    asyncio.run(_amain())
+    with contextlib.suppress(KeyboardInterrupt):
+        asyncio.run(_amain())
 
 
 if __name__ == "__main__":

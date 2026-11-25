@@ -152,6 +152,31 @@ async def test_original_button_is_refused_for_failed_jobs(app):
     assert alerts(app)[-1].text == messages.NOT_RETRYABLE
 
 
+async def test_orig_command_starts_original_job_and_enforces_ownership_and_idempotency(app):
+    parent = await finished_job(app)
+    await app.feed(message_update(f"/orig_{parent.id}", message_id=80))
+    await app.drain()
+    child = app.db.get_job(app.notifier.acks[-1])
+    assert child.delivery_mode is DeliveryMode.ORIGINAL and child.parent_job_id == parent.id
+    assert child.request_key == "cmd:80"
+
+    # Identical redelivered Telegram message is ignored without starting a third job.
+    n_acks = len(app.notifier.acks)
+    await app.feed(message_update(f"/orig_{parent.id}", message_id=80))
+    await app.drain()
+    assert len(app.notifier.acks) == n_acks
+
+    # Another user cannot invoke the owner's /orig_ command.
+    await app.feed(message_update(f"/orig_{parent.id}", user_id=OTHER, message_id=81))
+    assert messages.ACTION_NOT_ALLOWED in app.session.texts()
+    assert len(app.notifier.acks) == n_acks
+
+    # Malformed or unknown /orig_ commands report expired rather than URL-invalid.
+    await app.feed(message_update("/orig_notvalid", message_id=82))
+    await app.feed(message_update(f"/orig_{'d' * 32}", message_id=83))
+    assert app.session.texts()[-2:] == [messages.ACTION_EXPIRED, messages.ACTION_EXPIRED]
+
+
 # --- Retry -----------------------------------------------------------------------------------------------------
 async def test_retry_reruns_a_retryable_failure_with_the_same_mode(app):
     failed = await finished_job(app, plan=[BotError(ErrorCode.EXTRACTOR_CHANGED)])

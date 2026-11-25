@@ -16,6 +16,8 @@ For a short link (`vm.tiktok.com/...`, `/t/...`, `instagram.com/share/...`):
 from __future__ import annotations
 
 import dataclasses
+import time
+from collections import OrderedDict
 from collections.abc import Callable
 from urllib.parse import urljoin
 
@@ -24,10 +26,12 @@ import aiohttp
 from app.core.contracts import Platform
 from app.core.deadline import Deadline
 from app.core.errors import BotError, ErrorCode
-from app.core.net_guard import PinnedResolver, Resolver
+from app.core.net_guard import PinnedResolver, Resolver, tuned_socket_factory
 from app.core.url_validator import UrlKind, ValidatedUrl, validate_resolved, validate_url
 
 MAX_REDIRECTS = 5
+CACHE_CAPACITY = 256
+CACHE_TTL_SECONDS = 1800.0
 USER_AGENT = "Mozilla/5.0 (compatible; telegram-media-downloader)"
 _REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
 
@@ -43,6 +47,8 @@ class ShortLinkResolver:
         request_timeout: float = 10.0,
         scheme: str = "https",
         connector_factory: Callable[[], aiohttp.BaseConnector] | None = None,
+        cache_ttl: float = CACHE_TTL_SECONDS,
+        clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self._proxy = proxy
         self._extra = extra_hosts
@@ -52,15 +58,20 @@ class ShortLinkResolver:
         self._scheme = scheme  # production is always https; tests use http against a loopback server
         self._connector_factory = connector_factory
         self._session: aiohttp.ClientSession | None = None
+        self._cache_ttl = cache_ttl
+        self._clock = clock
+        self._cache: OrderedDict[str, tuple[ValidatedUrl, float]] = OrderedDict()
 
     def _get_session(self) -> aiohttp.ClientSession:
         if self._session is None or self._session.closed:
             if self._connector_factory is not None:
                 connector = self._connector_factory()
             elif self._proxy:
-                connector = aiohttp.TCPConnector()  # the egress proxy validates and pins destinations
+                connector = aiohttp.TCPConnector(keepalive_timeout=60.0, socket_factory=tuned_socket_factory)
             else:
-                connector = aiohttp.TCPConnector(resolver=PinnedResolver(self._dns))
+                connector = aiohttp.TCPConnector(
+                    resolver=PinnedResolver(self._dns), keepalive_timeout=60.0, socket_factory=tuned_socket_factory
+                )
             self._session = aiohttp.ClientSession(connector=connector, trust_env=False)
         return self._session
 
@@ -71,6 +82,15 @@ class ShortLinkResolver:
     async def resolve(self, validated: ValidatedUrl, deadline: Deadline) -> ValidatedUrl:
         if validated.kind is UrlKind.POST:
             return validated
+        cache_key = validated.extraction_url
+        if self._cache_ttl > 0:
+            cached = self._cache.get(cache_key)
+            if cached is not None:
+                target, expires = cached
+                if expires > self._clock():
+                    self._cache.move_to_end(cache_key)
+                    return dataclasses.replace(target, original_url=validated.original_url)
+                self._cache.pop(cache_key, None)
         platform = validated.platform
         current = validated.extraction_url
         seen: set[str] = set()
@@ -81,6 +101,11 @@ class ShortLinkResolver:
                 raise BotError(ErrorCode.INVALID_URL, "redirect left the original platform", reason="platform_mismatch")
             if hop.kind is UrlKind.POST:
                 final = validate_resolved(current, platform, extra_hosts=self._extra)
+                if self._cache_ttl > 0:
+                    self._cache[cache_key] = (final, self._clock() + self._cache_ttl)
+                    self._cache.move_to_end(cache_key)
+                    while len(self._cache) > CACHE_CAPACITY:
+                        self._cache.popitem(last=False)
                 return dataclasses.replace(final, original_url=validated.original_url)  # keep attribution
             if hop.extraction_url in seen:
                 raise BotError(ErrorCode.INVALID_URL, "redirect loop", reason="redirects")

@@ -14,6 +14,7 @@ from app.bot import messages
 from app.core.contracts import DeliveryMode
 
 ORIGINAL_PREFIX = "orig:"
+ORIG_CMD_PREFIX = "/orig_"
 RETRY_PREFIX = "retry:"
 SETTINGS_PREFIX = "set:"
 _JOB_ID = re.compile(r"^[0-9a-f]{32}$")

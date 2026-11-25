@@ -19,6 +19,8 @@ from pathlib import Path
 
 import pytest
 
+from app.bot import messages
+from app.bot.keyboards import original_data
 from app.core.contracts import DeliveryMode, JobState, Platform
 from app.services.cleanup import WorkspaceManager
 from app.services.health import evaluate_health, read_heartbeat
@@ -60,57 +62,82 @@ async def test_a_carousel_travels_from_a_telegram_message_to_byte_exact_uploads(
     assert order == [
         "sendMessage",
         "editMessageText",
-        "editMessageText",
         "sendMediaGroup",
-        "sendMessage",
         "deleteMessage",
     ]
-    ack, prep, send, _, link, _ = s.calls[-6:]
+    ack, send, _, _ = s.calls[-4:]
     assert ack.fields["text"] == "Fetching media..." and json.loads(ack.fields["reply_parameters"])["message_id"] == 50
-    assert (prep.fields["text"], send.fields["text"]) == ("Preparing...", "Sending...")
+    assert send.fields["text"] == "Sending..."
 
+    (job,) = app.jobs()
     group, items, uploads = media_group(s)
     assert [i["type"] for i in items] == ["photo", "video", "photo"]  # source order and types preserved
-    assert items[0]["caption"] == f"Original link: {IG_POST}" and "caption" not in items[1]
+    assert items[0]["caption"] == f"{IG_POST}\n240p/120p/100p\nOriginal files: /orig_{job['id']}"
+    assert "caption" not in items[1]
     assert items[1]["supports_streaming"] is True and (items[1]["width"], items[1]["height"]) == (160, 120)
     # The bytes that crossed HTTP are the bytes that were downloaded (nothing recompressed or reordered):
     assert [u[1] for u in uploads] == [media.jpg.read_bytes(), media.mp4_h264_aac.read_bytes(), media.png.read_bytes()]
     assert [u[0] for u in uploads] == ["instagram_01.jpg", "instagram_02.mp4", "instagram_03.png"]
 
-    markup = json.loads(link.fields["reply_markup"])
-    (button,) = markup["inline_keyboard"][0]
-    assert link.fields["text"] == f"Original link: {IG_POST}" and button["text"] == "Original files"
-    assert button["callback_data"].startswith("orig:")
-
-    (job,) = app.jobs()
     assert (job["state"], job["delivered_count"], job["expected_count"]) == ("COMPLETED", 3, 3)
     assert list(app.settings.work_dir.glob("*")) == [], "the job workspace must be gone"
     assert s.calls[-1].method == "deleteMessage"  # success removes the status message
 
 
-async def test_original_files_button_refetches_and_sends_the_same_items_as_documents(app, media):  # AT14 / AT23
+async def test_original_files_button_refetches_and_sends_the_same_items_as_documents(tmp_path, media):  # AT14 / AT23
+    e = await start_e2e(tmp_path)
+    try:
+        e.tools.gd_dump(IG_POST, "gd_instagram_photo")
+        e.tools.gd_files(IG_POST, {1: media.jpg})
+        await e.say(IG_POST, message_id=50)
+        await e.idle()
+        photo = e.server.calls_of("sendPhoto")[-1]
+        data = json.loads(photo.fields["reply_markup"])["inline_keyboard"][0][0]["callback_data"]
+
+        await e.tap(data, cq_id="cbq-1")
+        await e.server.wait_for(lambda: len(e.server.calls_of("sendDocument")) == 1)
+        await e.idle()
+
+        (doc,) = e.server.calls_of("sendDocument")
+        assert next(iter(doc.files.values()))[1] == media.jpg.read_bytes()
+        assert "reply_markup" not in doc.fields, "an Original-files job offers no Original-files button"
+        assert e.server.calls_of("answerCallbackQuery")
+        first, second = e.jobs()
+        assert (
+            second["parent_job_id"] == first["id"]
+            and second["delivery_mode"] == "original"
+            and second["state"] == "COMPLETED"
+        )
+        assert e.tools.calls_to("gallery_dl")  # the source was re-fetched, never reconstructed from a Telegram file_id
+    finally:
+        await e.stop()
+
+
+async def test_album_original_command_refetches_and_sends_documents(app, media):
     await app.say(IG_POST, message_id=50)
     await app.idle()
-    link = app.server.calls_of("sendMessage")[-1]
-    data = json.loads(link.fields["reply_markup"])["inline_keyboard"][0][0]["callback_data"]
+    _, items, _ = media_group(app.server)
+    cmd = items[0]["caption"].splitlines()[-1].removeprefix("Original files: ")
+    assert cmd.startswith("/orig_")
 
-    await app.tap(data, cq_id="cbq-1")
-    await app.server.wait_for(lambda: len(app.server.calls_of("sendMediaGroup")) == 2)
+    await app.say(cmd, message_id=51)
+    await app.server.wait_for(lambda: len(app.server.calls_of("sendDocument")) == 2)
     await app.idle()
 
-    group, items, uploads = media_group(app.server)
-    assert [i["type"] for i in items] == ["document"] * 3
-    assert [u[1] for u in uploads] == [media.jpg.read_bytes(), media.mp4_h264_aac.read_bytes(), media.png.read_bytes()]
-    follow_up = app.server.calls_of("sendMessage")[-1]
-    assert "reply_markup" not in follow_up.fields, "an Original-files job offers no Original-files button"
-    assert app.server.calls_of("answerCallbackQuery")
+    docs = app.server.calls_of("sendDocument")
+    (vid,) = app.server.calls_of("sendVideo")
+    assert [
+        next(iter(docs[0].files.values()))[1],
+        next(iter(vid.files.values()))[1],
+        next(iter(docs[1].files.values()))[1],
+    ] == [media.jpg.read_bytes(), media.mp4_h264_aac.read_bytes(), media.png.read_bytes()]
+    assert len(app.server.calls_of("sendMediaGroup")) == 1  # documents/video don't add another link message
     first, second = app.jobs()
     assert (
         second["parent_job_id"] == first["id"]
         and second["delivery_mode"] == "original"
         and second["state"] == "COMPLETED"
     )
-    assert app.tools.calls_to("gallery_dl")  # the source was re-fetched, never reconstructed from a Telegram file_id
 
 
 async def test_a_single_video_is_sent_with_sendvideo(tmp_path, media):  # AT01
@@ -123,7 +150,7 @@ async def test_a_single_video_is_sent_with_sendvideo(tmp_path, media):  # AT01
         await e.say(f"look {TT_VIDEO}?is_from_webapp=1", message_id=9)
         await e.idle()
         (video,) = e.server.calls_of("sendVideo")
-        assert video.fields["caption"] == f"Original link: {TT_VIDEO}?is_from_webapp=1"  # exactly what the user sent
+        assert video.fields["caption"] == f"{TT_VIDEO}\n120p"  # query stripped + resolution, no extra words
         assert (video.fields["width"], video.fields["height"], video.fields["supports_streaming"]) == (
             "160",
             "120",
@@ -131,8 +158,16 @@ async def test_a_single_video_is_sent_with_sendvideo(tmp_path, media):  # AT01
         )
         tag = video.fields["video"].removeprefix("attach://")  # aiogram references the multipart part by token
         assert video.files[tag][1] == media.mp4_h264_aac.read_bytes()
-        assert "reply_markup" in video.fields  # the button rides on the single media message
+        assert "reply_markup" not in video.fields  # no Original files button for videos
         assert not e.server.calls_of("sendMediaGroup")
+
+        await e.say(TT_VIDEO, message_id=10)
+        await e.server.wait_for(lambda: len(e.server.calls_of("sendVideo")) == 2)
+        await e.idle()
+        resend = e.server.calls_of("sendVideo")[-1]
+        assert resend.fields["video"] == video.reply["video"]["file_id"] and not resend.files
+        assert resend.fields["caption"] == f"{TT_VIDEO}\n120p"
+        assert len(e.tools.calls_to("yt_dlp")) == 4  # both requests rechecked and fetched the source
     finally:
         await e.stop()
 
@@ -145,6 +180,34 @@ async def test_strangers_and_groups_get_nothing_and_trigger_no_extraction(app): 
     await asyncio.sleep(2.5)  # a few poll cycles
     assert [c.method for c in app.server.calls if c.method != "getMe"] == []
     assert app.tools.calls == [] and app.jobs() == []
+
+
+async def test_public_access_delivers_to_unlisted_users_in_their_own_chats(tmp_path, media):
+    e = await start_e2e(tmp_path, public_access=True)
+    try:
+        e.tools.gd_dump(IG_POST, "gd_instagram_photo")
+        e.tools.gd_files(IG_POST, {1: media.jpg})
+        await e.tap("set:original", cq_id="set-original", user_id=222)
+        await e.server.wait_for(lambda: e.server.calls_of("answerCallbackQuery"))
+
+        await e.say(IG_POST, message_id=1, user_id=444, chat_type="supergroup")
+        await e.say(IG_POST, message_id=1, user_id=222)
+        await e.say(IG_POST, message_id=1, user_id=333)
+        await e.server.wait_for(lambda: len(e.jobs()) >= 2)
+        await e.idle()
+
+        jobs = {job["owner_id"]: job for job in e.jobs()}
+        assert set(jobs) == {222, 333}
+        assert all(job["state"] == "COMPLETED" and job["chat_id"] == uid for uid, job in jobs.items())
+        assert [call.chat_id for call in e.server.calls_of("sendDocument")] == [222]
+        assert [call.chat_id for call in e.server.calls_of("sendPhoto")] == [333]
+
+        await e.tap(original_data(jobs[333]["id"]), cq_id="other-users-job", user_id=222)
+        await e.server.wait_for(lambda: len(e.server.calls_of("answerCallbackQuery")) == 2)
+        assert e.server.calls_of("answerCallbackQuery")[-1].fields["text"] == messages.ACTION_NOT_ALLOWED
+        assert len(e.jobs()) == 2
+    finally:
+        await e.stop()
 
 
 async def test_multiple_links_are_refused_politely(app):  # AT25

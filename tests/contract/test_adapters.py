@@ -451,11 +451,20 @@ async def test_story_without_a_configured_session_asks_the_owner_to_configure_on
     assert not exc.value.fallback_allowed
 
 
+def assert_private_session_copy(given: Path, world: World) -> None:
+    assert given != world.cookies and given.is_relative_to(world.ws)
+    assert given.read_text() == world.cookies.read_text()
+
+
 async def test_session_cookies_are_used_for_stories_only(world):
     story_world(world)
     await world.discover(IG_STORY)
     for call in world.fake.calls_to("gallery_dl"):
-        assert "--cookies" in call and call[call.index("--cookies") + 1] == str(world.cookies)
+        assert "--cookies" in call
+        # The tools only ever see a PRIVATE COPY inside the job workspace (they write cookies back on exit);
+        # the operator's file is never passed, and gallery-dl is told not to export the session anywhere.
+        assert_private_session_copy(Path(call[call.index("--cookies") + 1]), world)
+        assert call[call.index("-o", call.index("--cookies")) + 1] == "cookies-update=false"
     world.fake.calls.clear()
     world.fake.gd_dump(IG_POST, "gd_instagram_photo")
     world.fake.yt_info(IG_REEL, "ytdlp_instagram_reel")
@@ -489,7 +498,14 @@ async def test_p08_x_multi_photo_in_source_order(world):
     assert manifest.post_type is PostType.CAROUSEL and manifest.expected_count == 4
     assert dims(result) == [(320, 240), (200, 100), (40, 1000), (320, 240)] and result.completeness == "complete"
     args = world.fake.calls_to("gallery_dl")[0]
-    for opt in ("quoted=false", "retweets=false", "cards=false", "text-tweets=false", "articles=false"):
+    for opt in (
+        "quoted=false",
+        "retweets=false",
+        "cards=false",
+        "text-tweets=false",
+        "articles=false",
+        "ratelimit=abort",
+    ):
         assert opt in args  # only the post's own attachments
 
 
@@ -525,7 +541,7 @@ async def test_x_retweet_media_is_rejected(world):
 
 
 async def test_x_text_only_post_has_no_media(world):
-    world.fake.gd_dump(X_URL, "gd_empty")
+    world.fake.gd_dump(X_URL, "gd_empty", stderr="[twitter][info] Requesting guest token\n")
     with pytest.raises(BotError) as exc:
         await world.discover(X_URL)
     assert exc.value.code is ErrorCode.UNSUPPORTED_POST and exc.value.reason == "no_media"
@@ -550,7 +566,13 @@ async def test_x_access_problems_are_reported_and_no_second_extractor_is_consult
 async def test_x_single_video_gets_one_identity_checked_ytdlp_retry(world):
     world.fake.gd_dump(X_URL, "gd_twitter_video")
     world.fake.gd_files(X_URL, {})  # gallery-dl could not deliver the file
-    world.fake.yt_info(X_URL, "ytdlp_twitter_video")
+    # Real-world Twitter amplify videos: entry.id is amplify media ID, entry.display_id is tweet ID
+    amplify_entry = {
+        **fixture("ytdlp_twitter_video"),
+        "id": "1964428072200900608",
+        "display_id": "1700000000000000000",
+    }
+    world.fake.yt_info(X_URL, amplify_entry)
     world.fake.yt_file(X_URL, world.media.mp4_h264_aac)
     manifest, result = await world.run(X_URL)
     assert len(result.assets) == 1 and result.omissions == [] and result.assets[0].source_format == "http-2176"

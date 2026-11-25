@@ -205,6 +205,6 @@ async def test_no_request_to_telegram_ever_carries_a_parse_mode(tmp_path, media)
         sent = [c for c in e.server.calls if c.method != "getMe"]
         assert sent and all("parse_mode" not in c.fields for c in sent)
         photo = e.server.calls_of("sendPhoto")[0]
-        assert photo.fields["caption"] == f"Original link: {nasty}"  # byte-for-byte, as plain text
+        assert photo.fields["caption"] == "https://www.instagram.com/p/ABCdef12345/\n240p"  # clean URL + resolution
     finally:
         await e.stop()

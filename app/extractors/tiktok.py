@@ -34,9 +34,11 @@ from app.extractors.base import (
     FetchOutcome,
     build_gd_items,
     check_item_limit,
+    fetch_ytdlp_video,
     gaps_in_numbering,
     manifest_items,
     map_downloads,
+    try_direct_gallerydl,
 )
 from app.media.quality import select_format
 
@@ -82,7 +84,7 @@ class TikTokAdapter:
         if len(info.entries) != 1:
             raise BotError(ErrorCode.EXTRACTOR_CHANGED, f"expected one entry, got {len(info.entries)}")
         entry = info.entries[0]
-        if entry.id != post_id:
+        if entry.id != post_id and entry.display_id != post_id:
             raise BotError(ErrorCode.EXTRACTOR_CHANGED, "yt-dlp returned a different post than requested")
         choice = select_format(entry.formats)  # raises EXTRACTOR_CHANGED/no_video when nothing is playable
         best = choice.video
@@ -104,7 +106,15 @@ class TikTokAdapter:
                 )
             ],
         )
-        return Discovered(manifest, "ytdlp", nums={0: 1}, hint="video")
+        return Discovered(
+            manifest,
+            "ytdlp",
+            nums={0: 1},
+            yt_info_json=info.info_json,
+            yt_sources=entry.sources,
+            yt_duration=entry.duration,
+            hint="video",
+        )
 
     async def _discover_gallerydl(
         self, request: ExtractionRequest, post_id: str, workspace: Path, deadline: Deadline
@@ -151,6 +161,7 @@ class TikTokAdapter:
             "gallerydl",
             nums={i.num - 1: i.num for i in items},
             schemes={i.num - 1: i.scheme for i in items},
+            urls={i.num - 1: (i.url, i.extension) for i in items if i.url},
             hint="photo",
         )
 
@@ -171,23 +182,44 @@ class TikTokAdapter:
         self, request: ExtractionRequest, found: Discovered, workspace: Path, deadline: Deadline
     ) -> FetchOutcome:
         item = found.manifest.items[0]
-        choice = select_format(item.candidate_formats)
-        paths = await self.ctx.ytdlp.download(
-            request.extraction_url, workspace, deadline, selector=choice.selector, hint="video"
+        path, choice, note = await fetch_ytdlp_video(
+            self.ctx,
+            request.extraction_url,
+            item.candidate_formats,
+            found.yt_sources,
+            found.yt_info_json,
+            workspace,
+            deadline,
+            duration=found.yt_duration,
+            hint="video",
         )
         fetched = FetchedItem(
             source_item_id=item.source_item_id,
             position=0,
             kind=ItemKind.VIDEO,
-            path=paths[0],
+            path=path,
             source_format=choice.video.format_id if choice.video else None,
             processing=Processing.MERGED if choice.merge else Processing.UNCHANGED,
+            quality_note=note,
         )
         return FetchOutcome(items=[fetched], expected_count=1, count_verified=True)
 
     async def _fetch_gallerydl(
         self, request: ExtractionRequest, found: Discovered, workspace: Path, deadline: Deadline
     ) -> FetchOutcome:
+        direct_files = await try_direct_gallerydl(
+            self.ctx, found, workspace, deadline, extra_headers={"Referer": "https://www.tiktok.com/"}
+        )
+        if direct_files is not None:
+            items, omissions = map_downloads(found, direct_files)
+            manifest = found.manifest
+            return FetchOutcome(
+                items=items,
+                omissions=omissions,
+                expected_count=manifest.expected_count,
+                count_verified=manifest.count_verified,
+                skipped_media_warning=manifest.skipped_media_warning,
+            )
         res = await self.ctx.gallerydl.download(
             request.extraction_url, workspace, deadline, options=GD_OPTIONS, hint="photo", session_supported=False
         )

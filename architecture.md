@@ -6,7 +6,7 @@ Version 1.0 | 2026-11-24 | Related: [PRD](PRD.md), [Implementation tasks](tasks.
 
 ## 1. Architecture decision
 
-Use a modular Python monolith with asynchronous Telegram handling, an internal bounded job queue, isolated extractor subprocesses, temporary local files and SQLite for small operational metadata. Deploy with Docker Compose on a single Linux VPS. No separate frontend, Redis, Celery, PostgreSQL, AI model, object storage, or paid extraction API is required for the initial personal-use workload.
+Use a modular Python monolith with asynchronous Telegram handling, an internal bounded job queue, isolated extractor subprocesses, temporary local files and SQLite for small operational metadata. Deploy natively (no Docker) on a single Linux VPS with `systemd`, or run directly on Windows using Python 3.12 (`uv` + `.venv`) and system FFmpeg/FFprobe. No separate frontend, Redis, Celery, PostgreSQL, AI model, object storage, or paid extraction API is required for the initial personal-use workload.
 
 Keep extraction libraries behind adapters so a platform-specific failure can be fixed without rewriting Telegram integration. Treat every extractor result as untrusted data. Full-quality production delivery uses a local Telegram Bot API server if verified and needed for files above hosted limits. The hosted API is the lightweight development/default-small-file profile.
 
@@ -22,13 +22,13 @@ Keep extraction libraries behind adapters so a platform-specific failure can be 
 | Media processing | FFmpeg | Lossless stream merge/remux where possible |
 | Network | httpx or aiohttp | Controlled redirect validation and adapter HTTP, with timeouts |
 | Settings/contracts | Pydantic / pydantic-settings | Validated configuration and internal data contracts |
-| Metadata | SQLite (WAL, restricted persistent volume) | Small job state, owner preferences, retries and callback mapping |
+| Metadata | SQLite (WAL, restricted local `data/` directory) | Small job state, owner preferences, retries and callback mapping |
 | Concurrency | asyncio.Queue + semaphores | Bounded personal-use background jobs without a broker |
-| Runtime | Docker Compose, Linux VPS | Reproducible dependencies, restart policy and service isolation |
-| Large uploads | Official local telegram-bot-api server, optional profile | Up to 2000 MB uploads per file; requires Telegram API ID/hash |
+| Runtime | Native Python 3.12 (`uv` + `.venv`) on Linux VPS (`systemd`) or Windows | Reproducible locked dependencies, `systemd` hardening and restart policy, no container overhead |
+| Large uploads | Optional local `telegram-bot-api` server (`127.0.0.1:8081`) | Up to 2000 MB uploads per file; requires Telegram API ID/hash |
 | Tests | pytest, pytest-asyncio | Unit, contract, integration and opt-in live tests |
 
-Pin actual dependency versions and image digests after the feasibility phase; do not guess a current release version. Keep a tested lock file and update extractors only after smoke tests. Verify licenses for the chosen dependency distributions.
+Pin actual dependency versions in `pyproject.toml`, `uv.lock`, and `requirements.lock`; do not guess release versions. Keep tested lock files and update extractors only after smoke tests. Verify licenses for the chosen dependency distributions.
 
 ## 3. Component diagram
 
@@ -76,7 +76,7 @@ sequenceDiagram
     participant P as Media processor
     participant D as Delivery service
     U->>B: Send one social media post URL
-    B->>B: Check owner, private chat, URL syntax
+    B->>B: Check sender access, private chat, URL syntax
     B->>Q: Create job and reserve queue slot
     B-->>U: Fetching media...
     Q->>W: Dispatch job
@@ -105,15 +105,16 @@ telegram-media-downloader/
 ├── tasks.md
 ├── README.md
 ├── pyproject.toml
+├── uv.lock
 ├── requirements.lock
 ├── .env.example
 ├── .gitignore
-├── Dockerfile
-├── compose.yaml
+├── start-bot.bat
 ├── app/
 │   ├── __init__.py
 │   ├── main.py
 │   ├── config.py
+│   ├── healthcheck.py
 │   ├── bot/
 │   │   ├── handlers.py
 │   │   ├── callbacks.py
@@ -123,6 +124,7 @@ telegram-media-downloader/
 │   │   ├── contracts.py
 │   │   ├── errors.py
 │   │   ├── url_validator.py
+│   │   ├── net_guard.py
 │   │   ├── job_queue.py
 │   │   └── worker.py
 │   ├── extractors/
@@ -132,7 +134,11 @@ telegram-media-downloader/
 │   │   ├── instagram.py
 │   │   ├── twitter.py
 │   │   ├── ytdlp_runner.py
-│   │   └── gallerydl_runner.py
+│   │   ├── gallerydl_runner.py
+│   │   ├── local.py
+│   │   ├── service.py
+│   │   ├── remote.py
+│   │   └── session_file.py
 │   ├── media/
 │   │   ├── probe.py
 │   │   ├── quality.py
@@ -141,6 +147,9 @@ telegram-media-downloader/
 │   ├── services/
 │   │   ├── telegram_sender.py
 │   │   ├── subprocess_runner.py
+│   │   ├── egress_proxy.py
+│   │   ├── health.py
+│   │   ├── alerts.py
 │   │   └── cleanup.py
 │   └── storage/
 │       ├── db.py
@@ -153,8 +162,12 @@ telegram-media-downloader/
 │   ├── live/
 │   └── fixtures/
 └── ops/
+    ├── setup-ubuntu.sh
     ├── deploy.md
-    └── troubleshooting.md
+    ├── troubleshooting.md
+    ├── test-report.md
+    ├── feasibility.md
+    └── dev-log.md
 ```
 
 Runtime directories (`data/`, `tmp/`, `secrets/`) must be excluded from Git. Test fixtures should be synthetic or explicitly licensed; never commit session cookies or personal Story media.
@@ -180,9 +193,7 @@ Each platform adapter implements the following conceptual interface. A library m
 ```python
 class PlatformAdapter(Protocol):
     async def discover(self, request: ExtractionRequest) -> PostManifest: ...
-    async def fetch(
-        self, manifest: PostManifest, workspace: Path
-    ) -> ExtractionResult: ...
+    async def fetch(self, manifest: PostManifest, workspace: Path) -> ExtractionResult: ...
 ```
 
 `discover` must resolve a single target post/story, determine item order and identify available formats. `fetch` must materialize only the intended items. Use opaque provider format IDs and structured extractor metadata rather than exposing signed CDN URLs to Telegram or persisting them in the database.
@@ -265,7 +276,7 @@ If manifest metadata cannot prove completeness, mark the result `unverified` eve
 5. Keep original user URL for captions but strip tracking parameters from the extraction URL when safe. Do not interpret captions as HTML; send plain text or escape user-controlled strings.
 6. Validate extracted filesystem paths: resolved paths must remain within the assigned workspace, reject symlinks and unexpected file types, probe local files only, and disable network-capable protocols in media processing.
 
-For production isolation, run extractors under a separate restricted worker identity/container, with only its job directory and necessary read-only session configuration mounted, no Docker socket, no host networking, no bot token and no access to the SQLite volume. The worker boundary can be implemented using a small private worker service over a Unix socket or internal authenticated connection; if a subprocess-only prototype shares the bot environment, do not call it production-isolated. Enforce network egress and process resource limits in deployment before release. The orchestrator remains the only trusted owner of the job database and Telegram sends.
+Default native production runs single-process (`WORKER_MODE=inprocess`) under a hardened `systemd` unit (`tmd-bot.service`: unprivileged service user, `NoNewPrivileges=true`, `PrivateTmp=true`, `ProtectSystem=strict`, `ReadWritePaths=<repo>/data <repo>/tmp`, `MemoryMax=2G`, `TasksMax=256`) with per-job workspaces, sanitized subprocess environments, POSIX rlimits, and process-tree termination. When stronger OS-level process separation is desired on a Linux VPS, run the optional pure-Python extractor worker (`python -m app.extractors.service` on `127.0.0.1:8090`) and allowlisting egress proxy (`python -m app.services.egress_proxy` on `127.0.0.1:3128`) under a separate unprivileged user that has no bot token, no SQLite access, and group-shared access only to `tmp/jobs/` (`2770`). The orchestrator remains the only trusted owner of the job database and Telegram sends.
 
 ## 9. Media quality pipeline
 
@@ -362,7 +373,7 @@ CREATE TABLE preferences (
 );
 ```
 
-Use parameterized SQL, transactions for reservation/state changes, and WAL for local concurrency. For retry/original callback jobs, reserve a fresh logical request ID using the callback query/event ID (extend the unique key with a request key in the actual migration); do not overwrite an earlier successful record. Persist callback idempotency and verified send outcomes per batch as needed in a job_deliveries table. Original URLs and preferences stay on a restricted persistent volume; purge expired jobs and dependent records after the default 24-hour TTL. Do not store actual media, signed URLs, or credentials in SQLite. Avoid long-lived backups of job URLs. SQLite is not encrypted by default; use a protected disk or encrypted volume if required.
+Use parameterized SQL, transactions for reservation/state changes, and WAL for local concurrency. For retry/original callback jobs, reserve a fresh logical request ID using the callback query/event ID (extend the unique key with a request key in the actual migration); do not overwrite an earlier successful record. Persist callback idempotency and verified send outcomes per batch as needed in a job_deliveries table. Original URLs and preferences stay in a restricted local `data/` directory (`0700`/`0600`); purge expired jobs and dependent records after the default 24-hour TTL. Do not store actual media, signed URLs, or credentials in SQLite. Avoid long-lived backups of job URLs. SQLite is not encrypted by default; use a protected disk or encrypted filesystem if required.
 
 On startup: migrate database, remove orphaned workspaces, mark nonterminal previous-run jobs interrupted, and report interruption on owner retry/status. Do not blindly resume uploads. If the process crashes between a Telegram send and its DB write, exact-once delivery is impossible; show an unknown outcome and let the owner decide whether to retry.
 
@@ -371,12 +382,19 @@ On startup: migrate database, remove orphaned workspaces, mark nonterminal previ
 Example `.env.example` (values are placeholders; never use actual secrets in this file):
 
 ```dotenv
+APP_ENV=development
 BOT_TOKEN=replace_me
+PUBLIC_ACCESS=false
 ALLOWED_USER_IDS=123456789
+PRIVATE_CHAT_ONLY=true
 BOT_API_MODE=hosted
-# Optional local mode, private network only:
-LOCAL_BOT_API_URL=http://telegram-bot-api:8081
-# Supply TELEGRAM_API_ID and TELEGRAM_API_HASH only to local API service via secrets.
+# Optional local mode, loopback only:
+LOCAL_BOT_API_URL=http://127.0.0.1:8081
+# Supply TELEGRAM_API_ID and TELEGRAM_API_HASH only to the local API service (never read by the bot).
+WORKER_MODE=inprocess
+WORKER_URL=http://127.0.0.1:8090
+WORKER_HOST=127.0.0.1
+WORKER_PORT=8090
 DEFAULT_DELIVERY_MODE=media
 MAX_CONCURRENT_JOBS=2
 MAX_ACTIVE_JOBS_PER_USER=1
@@ -393,44 +411,45 @@ ORPHAN_TTL_MINUTES=30
 LOG_LEVEL=INFO
 ```
 
-The allowed-user list is parsed as numeric IDs. Reject startup on absent/placeholder tokens or empty allowlist in production. Optional session credentials are mounted as narrowly scoped read-only secrets, not sent to the Telegram bot and not placed in logs. Configure the extractor worker independently. The local API service obtains its own API ID/hash securely; consult official migration instructions, including `logOut` from hosted API before switching and preventing concurrent polling from both endpoints.
+Production startup (`APP_ENV=production`) supports single-process `WORKER_MODE=inprocess` and requires a valid token, `PRIVATE_CHAT_ONLY=true`, and either `PUBLIC_ACCESS=true` or a nonempty list of numeric Telegram IDs (`ALLOWED_USER_IDS`). When `WORKER_MODE=remote` is enabled in production, startup additionally enforces a strong `WORKER_SECRET` (>= 24 chars) and valid `WORKER_URL`. Operational alerts, when enabled, go to `ALLOWED_USER_IDS`. Optional file-based secrets (`BOT_TOKEN_FILE`, `WORKER_SECRET_FILE`, `INSTAGRAM_COOKIES_FILE`) live under `secrets/` with restrictive permissions (`0400`/`0440`) and are never logged or sent to Telegram. The optional local Bot API server obtains its own API ID/hash separately; consult official migration instructions, including `logOut` from hosted API before switching and preventing concurrent polling from both endpoints.
 
 Retries: at most two for safe transient network/extraction errors, exponential backoff with jitter, respecting `Retry-After`; no retry for invalid/restricted/expired content or known permanent errors. Telegram 429 retry only after specified delay; unknown send timeout requires user-visible uncertainty, not blind replay. Status edits are throttled to avoid chat spam and rate limits.
 
 ## 13. Deployment design
 
-### Development profile
+### Development & desktop profile (Windows / Linux / macOS)
 
-- Linux, macOS or Windows with Docker/WSL2.
-- One bot process using long polling (no public webhook/domain needed), hosted Telegram Bot API, pinned media tools, SQLite and per-job temp directory.
+- Runs natively with Python 3.12 (`uv` + `.venv`) and `ffmpeg`/`ffprobe` on `PATH` — no Docker required.
+- On Windows, launch via `start-bot.bat` or `uv run python -m app.main`.
+- One bot process using long polling (no public webhook/domain needed), hosted Telegram Bot API, locked dependencies, local SQLite (`data/bot.sqlite3`), and per-job temp directory (`tmp/jobs/`).
 - Restrict to test owner. Validate content using permitted live links and mocked fixtures.
 
-### Production profile
+### Production profile (Linux VPS, native `systemd`)
 
 ```mermaid
 flowchart LR
-    TG[Telegram cloud] <--> API[Optional local Bot API]
-    API <--> BOT[Bot / orchestrator container]
-    BOT <--> DB[(Persistent SQLite volume)]
-    BOT <--> WORKER[Restricted extractor worker]
-    WORKER <--> NET[Controlled platform/CDN egress]
-    BOT <--> TMP[(Temporary shared job files)]
+    TG[Telegram cloud] <--> API[Hosted or local Bot API 127.0.0.1:8081]
+    API <--> BOT[tmd-bot systemd service]
+    BOT <--> DB[(Local SQLite data/bot.sqlite3)]
+    BOT <--> WORKER[In-process or optional 127.0.0.1 worker]
+    WORKER <--> NET[Platform/CDN or optional 127.0.0.1 egress proxy]
+    BOT <--> TMP[(Per-job temp files tmp/jobs)]
     WORKER <--> TMP
 ```
 
-In hosted mode, the bot calls Telegram cloud directly instead of the local API container.
+In the default hosted single-process deployment (`ops/setup-ubuntu.sh`), `tmd-bot.service` calls Telegram cloud directly and runs extractors in-process (`WORKER_MODE=inprocess`) under `APP_ENV=production` with `systemd` hardening (`NoNewPrivileges`, `PrivateTmp`, `ProtectSystem=strict`, `ReadWritePaths`, `MemoryMax=2G`, `TasksMax=256`).
 
-Starting VPS sizing assumption: 2 vCPU, 4 GB RAM, 40 GB SSD, adequate bandwidth; smaller VPS may work for light hosted-mode jobs. Measure CPU, memory, upload bandwidth and temp disk usage with the real workload. Local API operation and 2 GB files may require more storage/RAM; include its own temporary/cache volume in capacity planning. Protect shared paths and use a separate per-job directory with explicit ownership. Only expose SSH or administrative access as required; no public local Bot API port. Use an unprivileged service user, restart policy, health checks, log rotation, dependency/image pinning and resource limits.
+Starting VPS sizing assumption: 2 vCPU, 4 GB RAM, 40 GB SSD, adequate bandwidth; smaller VPS may work for light hosted-mode jobs. Measure CPU, memory, upload bandwidth and temp disk usage with the real workload. Local API operation and 2 GB files may require more storage/RAM; include its own temporary/cache directory in capacity planning. Protect `data/`, `tmp/jobs/`, `.env`, and `secrets/` with explicit service-user ownership. Only expose SSH (via UFW); bind any local Bot API, remote worker, or egress proxy strictly to `127.0.0.1`. Use an unprivileged service user (`tmd` or `SUDO_USER`), `systemd` restart policy, `python -m app.healthcheck`, `journald` log caps, `uv.lock`/`requirements.lock` dependency pinning, and resource limits.
 
-If using shared local file paths with the local Bot API server, mount only the necessary transfer directory at matching paths or use multipart upload; never expose arbitrary filesystem paths. Keep both modes covered by integration tests.
+If running an optional local Bot API server on `127.0.0.1:8081`, keep it restricted to the dedicated service user and multipart uploads (or an explicitly scoped transfer directory); never expose arbitrary filesystem paths. Keep both modes covered by integration tests.
 
 ### Operations and observability
 
 - Log request/job ID, platform, state, duration, file size, counts, retry count and normalized error code. Redact URLs, credentials, signed media addresses and subprocess output.
-- Health check: bot startup/polling freshness, worker connectivity, SQLite writability and disk headroom. Alert on repeated failures or disk pressure if desired; no public dashboard needed.
-- Record extractor versions and platform-specific live smoke results. Review updates after platform breakages and roll back to last tested build if needed.
-- Cleanup in `finally` plus scheduled orphan checks (in-process while running) and startup sweep; never remove an active job directory. On service shutdown, cancel safely and mark interrupted jobs.
-- Include cache/temporary volume cleanup for the local API according to its documented behavior. Removing local files does not delete Telegram chat messages or necessarily Telegram's retained copy.
+- Health check (`python -m app.healthcheck`): reads `data/heartbeat` (no network) to verify polling freshness, worker connectivity, SQLite writability and disk headroom. Alert on repeated failures or disk pressure if desired (`ALERTS_ENABLED=true`); no public dashboard needed.
+- Record extractor versions and platform-specific live smoke results. Review updates after platform breakages and roll back to the last tested Git commit + `uv sync --locked --no-dev` if needed.
+- Cleanup in `finally` plus scheduled orphan checks (in-process while running) and startup sweep; never remove an active job directory. On service shutdown (`systemctl stop`/`restart` or `Ctrl+C`), cancel safely and mark interrupted jobs.
+- Include cache/temporary directory cleanup for the local Bot API according to its documented behavior. Removing local files does not delete Telegram chat messages or necessarily Telegram's retained copy.
 
 ## 14. Error contract
 

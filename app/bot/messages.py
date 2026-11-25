@@ -10,7 +10,6 @@ from app.core.contracts import DeliveryMode, JobState
 from app.core.errors import BotError, ErrorCode
 
 FETCHING = "Fetching media..."
-PREPARING = "Preparing..."
 SENDING = "Sending..."
 
 START_TEXT = (
@@ -39,8 +38,9 @@ HELP_TEXT = (
     "- Profiles, hashtags and other pages are not supported.\n\n"
     "Quality\n"
     "- Media mode (default): photos and videos you can view right in the chat. Telegram may compress photos.\n"
-    "- Original files mode: everything is sent as a file so nothing is compressed. Choose it in /settings, or "
-    "tap 'Original files' under a result (the source is fetched again, so it can fail if the post is gone).\n"
+    "- Original files mode: photos are sent as uncompressed files (videos stay playable). Choose it in /settings, or "
+    "use 'Original files' (button or /orig_... link) on a photo result "
+    "(the source is fetched again, so it can fail if the post is gone).\n"
     "- I never reduce the resolution. If a file is too big for Telegram I tell you instead.\n\n"
     "Commands\n"
     "/settings - choose Media or Original files\n"
@@ -71,7 +71,7 @@ def settings_text(mode: DeliveryMode) -> str:
     current = (
         "Media (viewable in chat; photos may be compressed)"
         if mode is DeliveryMode.MEDIA
-        else ("Original files (sent as files, nothing is compressed)")
+        else ("Original files (photos sent as uncompressed files)")
     )
     return f"Delivery mode for new links:\n{current}\n\nChoose:"
 

@@ -1,4 +1,4 @@
-"""Client for the isolated extractor worker (T05.1): the ExtractionBackend the bot uses in production."""
+"""Client for the optional separate extractor worker service (T05.1, WORKER_MODE=remote)."""
 
 from __future__ import annotations
 
@@ -12,6 +12,7 @@ from app.config import Settings
 from app.core.contracts import ExtractionRequest, ExtractionResult, PostManifest
 from app.core.deadline import Deadline
 from app.core.errors import BotError, ErrorCode
+from app.core.net_guard import tuned_socket_factory
 from app.core.url_validator import ValidatedUrl
 from app.extractors.wire import MAX_BODY_BYTES, SECRET_HEADER, url_from_wire, url_to_wire
 from app.logging_setup import log_event
@@ -31,7 +32,7 @@ class RemoteExtractionBackend:
         if self._session is None or self._session.closed:
             self._session = aiohttp.ClientSession(
                 headers={SECRET_HEADER: self._secret}, trust_env=False, raise_for_status=False,
-                connector=aiohttp.TCPConnector(limit=8),
+                connector=aiohttp.TCPConnector(limit=8, keepalive_timeout=60.0, socket_factory=tuned_socket_factory),
             )  # fmt: skip
         return self._session
 

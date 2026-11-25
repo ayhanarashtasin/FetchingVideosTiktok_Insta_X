@@ -8,6 +8,8 @@ Platform *logic* is covered separately with synthetic fixtures (tests/contract).
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from app.core.contracts import ItemKind
@@ -17,6 +19,7 @@ from app.extractors.gallerydl_runner import GalleryDlRunner
 from app.extractors.ytdlp_runner import YtDlpRunner
 from app.media.probe import probe_file
 from app.media.quality import select_format
+from app.services.cleanup import WorkspaceManager
 from app.services.subprocess_runner import SubprocessRunner
 from tests.conftest import requires_ffmpeg
 
@@ -24,10 +27,9 @@ pytestmark = requires_ffmpeg
 
 
 @pytest.fixture
-def ws(tmp_path):
-    d = tmp_path / "ws"
-    d.mkdir()
-    return d
+def ws(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    return WorkspaceManager(Path("tmp/jobs")).create("a" * 32)
 
 
 def dl(seconds=120):
@@ -182,3 +184,48 @@ async def test_gallerydl_budget_kills_runaway_downloads(media, media_server, ws)
         assert exc.code in {ErrorCode.LIMIT_EXCEEDED, ErrorCode.EXTRACTOR_CHANGED}
     else:  # the file may finish before the 0.5 s watcher tick; either outcome is acceptable here,
         pass  # the deterministic budget kill is covered in test_subprocess_runner
+
+
+# --- the operator's session file is read-only: tools get a private per-job copy -------------------------
+def _read_only_session(tmp_path):
+    import os
+    import stat
+
+    jar = tmp_path / "operator-session.txt"
+    jar.write_text(
+        "# Netscape HTTP Cookie File\n.example.test\tTRUE\t/\tFALSE\t4102444800\tdummy\tvalue\n", encoding="utf-8"
+    )
+    os.chmod(jar, stat.S_IREAD)  # like the production mount
+    return jar, (jar.read_bytes(), jar.stat().st_mtime_ns)
+
+
+async def test_ytdlp_works_with_a_read_only_session_file_because_it_only_sees_a_private_copy(
+    media, media_server, ws, tmp_path
+):
+    """Finding (real yt-dlp): handed a READ-ONLY cookies file it saves the jar on exit, dies with a
+    PermissionError traceback and exit code 1 - even for a good extraction. The runner therefore never
+    passes the operator's file at all."""
+    from app.extractors.session_file import COOKIES_NAME
+
+    jar, snapshot = _read_only_session(tmp_path)
+    y = YtDlpRunner(SubprocessRunner(), allowed_extractors=("generic",), cookies=jar)
+    info = await y.discover(f"{media_server}/v_h264_aac.mp4", ws, dl(), use_cookies=True)
+    assert len(info.entries) == 1
+    assert (jar.read_bytes(), jar.stat().st_mtime_ns) == snapshot  # the original is untouched
+    assert (ws / ".home" / COOKIES_NAME).exists()  # the tool worked on its own copy
+
+
+async def test_gallerydl_with_a_session_file_never_modifies_the_original(media, media_server, ws, tmp_path):
+    jar, snapshot = _read_only_session(tmp_path)
+    g = GalleryDlRunner(SubprocessRunner(), cookies=jar)
+    dump = await g.discover(f"{media_server}/p_1.jpg", ws, dl(), options={}, use_cookies=True)
+    assert dump.files
+    assert (jar.read_bytes(), jar.stat().st_mtime_ns) == snapshot
+    assert not list(tmp_path.glob("*.tmp"))  # no write-back temp file next to the operator's file
+
+
+async def test_calls_that_must_stay_anonymous_do_not_even_copy_the_session(media, media_server, ws, tmp_path):
+    jar, _ = _read_only_session(tmp_path)
+    y = YtDlpRunner(SubprocessRunner(), allowed_extractors=("generic",), cookies=jar)
+    await y.discover(f"{media_server}/v_h264_aac.mp4", ws, dl(), use_cookies=False)
+    assert not (ws / ".home" / "session-cookies.txt").exists()

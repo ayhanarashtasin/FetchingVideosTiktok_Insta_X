@@ -66,9 +66,8 @@ class TelegramNotifier:
                     st.message_id = await self._send(job, text)
                     self._db.set_status_message(job.id, st.message_id)
                 else:
-                    wait = self._min_interval - (self._clock() - st.last_edit)
-                    if wait > 0:
-                        await self._sleep(wait)
+                    if self._clock() - st.last_edit < self._min_interval:
+                        return  # a progress edit must not hold up the job while rate-throttled
                     await self._edit(job, st.message_id, text, None)
                 st.last_text = text
                 st.last_edit = self._clock()

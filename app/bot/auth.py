@@ -1,9 +1,8 @@
 """Authorization (T02.2, FR-01, FR-17).
 
-An OUTER middleware on the Update: nothing - no handler, no job, no network request - runs unless
-the sender is a configured numeric user id talking to the bot in a PRIVATE chat. Everything else
-is dropped silently (no reply, so the bot cannot be used to probe or to spam strangers).
-Callback queries are covered by the same check, which is what makes callback ownership hold.
+Outer middleware checks the sender and chat before handlers run. Public access accepts any
+human user in their own private chat. The default requires a configured numeric user ID.
+Messages and callbacks that fail these checks are dropped silently.
 """
 
 from __future__ import annotations
@@ -45,13 +44,18 @@ def extract_actor(update: Update) -> Actor | None:
 
 
 class AuthMiddleware(BaseMiddleware):
-    def __init__(self, allowed_user_ids: Iterable[int], *, private_only: bool = True) -> None:
+    def __init__(
+        self, allowed_user_ids: Iterable[int], *, private_only: bool = True, public_access: bool = False
+    ) -> None:
         self._allowed = frozenset(allowed_user_ids)
-        self._private_only = private_only
+        self._public_access = public_access
+        self._private_only = private_only or public_access
         self._warned: set[int] = set()
 
     def is_authorized(self, actor: Actor) -> bool:
-        if actor.is_bot or actor.user_id not in self._allowed:
+        if actor.is_bot or actor.user_id <= 0:
+            return False
+        if not self._public_access and actor.user_id not in self._allowed:
             return False
         if self._private_only:
             # In a private chat the chat id equals the user id; checking both stops a callback

@@ -154,13 +154,26 @@ def test_remux_candidates():
             "network",
         ),
         ("ERROR: [TikTok] 1: There is no video in this post", ErrorCode.EXTRACTOR_CHANGED, "no_video"),
+        ("ERROR: [TikTok] 1: Your IP address is blocked from accessing this post", ErrorCode.RATE_LIMITED, None),
         ("Please complete the CAPTCHA to continue", ErrorCode.RATE_LIMITED, "challenge"),
+        ("failed to solve the challenge", ErrorCode.RATE_LIMITED, "challenge"),
         ("something totally unexpected", ErrorCode.EXTRACTOR_CHANGED, None),
     ],
 )
 def test_ytdlp_text_classification(text, code, reason):
     err = classify_ytdlp(text, 1, session_supported=True)
     assert (err.code, err.reason) == (code, reason)
+
+
+def test_gallerydl_info_log_noise_does_not_trigger_challenge_or_hide_real_error():
+    # Solving JavaScript challenge is normal gallery-dl info and must not trigger RATE_LIMITED
+    mixed = "[tiktok][info] Solving JavaScript challenge\n[tiktok][error] 123: Requested post not available"
+    err = classify_text(mixed)
+    assert err.code is ErrorCode.NOT_FOUND_OR_EXPIRED
+
+    info_only = "[tiktok][info] Solving JavaScript challenge"
+    err2 = classify_text(info_only)
+    assert err2.code is ErrorCode.EXTRACTOR_CHANGED and err2.reason is None
 
 
 def test_a_login_wall_on_a_platform_without_session_support_is_restricted_not_auth_required():

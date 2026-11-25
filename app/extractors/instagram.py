@@ -45,6 +45,7 @@ from app.extractors.base import (
     build_gd_items,
     check_item_limit,
     fetch_via_gallerydl,
+    fetch_ytdlp_video,
     gaps_in_numbering,
     manifest_items,
 )
@@ -131,7 +132,15 @@ class InstagramAdapter:
                 )
             ],
         )
-        return Discovered(manifest, "ytdlp", nums={0: 1}, hint="reel")
+        return Discovered(
+            manifest,
+            "ytdlp",
+            nums={0: 1},
+            yt_info_json=info.info_json,
+            yt_sources=entry.sources,
+            yt_duration=entry.duration,
+            hint="reel",
+        )
 
     async def _discover_post(
         self, request: ExtractionRequest, code: str, workspace: Path, deadline: Deadline, *, expect_video: bool
@@ -178,6 +187,7 @@ class InstagramAdapter:
             "gallerydl",
             nums={i.num - 1: i.num for i in items},
             schemes={i.num - 1: i.scheme for i in items},
+            urls={i.num - 1: (i.url, i.extension) for i in items if i.url},
             hint="post",
         )
 
@@ -253,6 +263,7 @@ class InstagramAdapter:
             "gallerydl",
             nums={item.num - 1: item.num},
             schemes={item.num - 1: item.scheme},
+            urls={item.num - 1: (item.url, item.extension)} if item.url else {},
             use_cookies=True,
             hint="story",
         )
@@ -274,17 +285,26 @@ class InstagramAdapter:
         self, request: ExtractionRequest, found: Discovered, workspace: Path, deadline: Deadline
     ) -> FetchOutcome:
         item = found.manifest.items[0]
-        choice = select_format(item.candidate_formats)
-        paths = await self.ctx.ytdlp.download(
-            request.extraction_url, workspace, deadline, selector=choice.selector, hint="reel", session_supported=True
+        path, choice, note = await fetch_ytdlp_video(
+            self.ctx,
+            request.extraction_url,
+            item.candidate_formats,
+            found.yt_sources,
+            found.yt_info_json,
+            workspace,
+            deadline,
+            duration=found.yt_duration,
+            hint="reel",
+            session_supported=True,
         )
         fetched = FetchedItem(
             item.source_item_id,
             0,
             ItemKind.VIDEO,
-            paths[0],
+            path,
             source_format=choice.video.format_id if choice.video else None,
             processing=Processing.MERGED if choice.merge else Processing.UNCHANGED,
+            quality_note=note,
         )
         return FetchOutcome(items=[fetched], expected_count=1, count_verified=True)
 

@@ -217,7 +217,83 @@ Built: `app/extractors/{wire,service,remote}.py` (isolated worker + client), `ap
 * I again typed placeholder assertions while writing a test (`... if False else None`) and caught it in review; no test
   in the repo contains such logic (`grep -rn "if False\|or True" tests app scripts` is empty).
 
-### Still OPEN in Phase 5 (needs the deployed containers, see Phase 6)
-T05.1/T05.2 production enforcement (internal network, non-root, read-only FS, no token/DB in the worker, proxy-only egress),
-T05.4 container-level limits, T05.6 local Bot API cache cleanup, T05.7 backup/retention documentation, T05.8 compose
-restart policy and log rotation.
+### Intermediate status note during Phase 5 code implementation
+At the conclusion of the initial in-process code slice, container-level enforcement (T05.1/T05.2, T05.4, T05.8), backup/retention
+documentation (T05.7), and local Bot API checks remained to be verified with the Compose deployment. These were subsequently
+executed, hardened, and verified in the deployment slice below.
+
+---
+
+## Phase 5 (completed) and Phase 6 - hardening, deployment, documentation (2026-11-24)
+
+### Findings that changed the code (each found by running real things, not by reading)
+* **yt-dlp crashes on a read-only cookies file.** Real yt-dlp given `--cookies <read-only file>` saves its jar on exit and dies
+  with a `PermissionError` traceback, exit code 1, *even for a successful extraction*; gallery-dl's `cookies-update` (default on)
+  rewrites the file via a `.tmp` sibling. The production mount is read-only, so Stories would have failed. Fix: every job
+  works on a **private per-job copy** (`app/extractors/session_file.py`, 0600, never through a symlink, inside the throw-away
+  workspace) and gallery-dl is also given `-o cookies-update=false`. Tests: unit, contract and **real-binary** (read-only
+  original stays byte- and mtime-identical).
+* **Cross-uid cleanup would have leaked workspaces.** The bot (uid 10001) must delete what the worker (uid 10002) creates;
+  worker subdirectories were 0755, so `rmtree` hit `PermissionError`, which was only logged. My Linux test runs as root,
+  which ignores permission bits, so it could not see this. Reproduced in Compose with the two real uids (a *control* run in
+  `ops/verify-isolation.sh` fails without the fix). Fix: worker `umask 007`; `share_with_group()` after every call (also on
+  errors and cancellation); `/work` created `root:media 2770` in the common base image; a failed delete no longer revokes the
+  group's access (`relaxed_mode`); removal failures are logged at ERROR.
+* **aiohttp does not cancel a handler when the client hangs up** by default. `handler_cancellation=True` now makes the bot's
+  /cancel and shutdown reach the worker and kill the tool tree. Mutation-checked (test fails without it).
+* **A fatal startup error printed a raw traceback**, bypassing log redaction (a transport error can embed
+  `https://api.telegram.org/bot<TOKEN>/...`). `amain()` now routes every fatal error through the redacting logger:
+  rejected token -> clear CRITICAL line, exit 3; anything else -> redacted `fatal error`, exit 1.
+* The subprocess watcher now checks before it sleeps; the lossless remux honours the disk-headroom floor.
+
+### Deployment verification (Docker Desktop, Compose 5.2): `ops/verify-isolation.sh --no-bot-health`
+Final run: **60 passed, 0 failed** (identity/filesystem/secrets 12; network isolation 11; bot<->worker auth 4; shared job
+directory 4 incl. the control; limits/policies for bot, worker, proxy 27; health 2). Highlights: worker uid 10002, read-only
+root, no capabilities, no `BOT_TOKEN`/`/data`; no direct route to 1.1.1.1 and no DNS; proxy 403 for unlisted host, IP literal,
+loopback, 169.254.169.254 and port 22, 200 for an allowlisted host (temporary `example.com`, restored afterwards); `/v1/health`
+200 with the secret, 401 without or wrong; `/work` is `root:media 2770`; memory 512 MiB / 2 GiB / 128 MiB, CPUs 1 / 2 / 0.5,
+PIDs 128 / 256 / 64; `unless-stopped`; log rotation 10m x 5.
+A trial start of the real bot process in its hardened container (read-only root, uid 10001, placeholder token) migrated the
+SQLite database on the volume, swept orphan workspaces and reached Telegram authentication.
+
+### Not done / not claimable
+Everything that needs a real VPS, token, platform, Telegram server or phone (see `ops/test-report.md`). The pinned
+`aiogram/telegram-bot-api` digest was read from the registry; the container itself was pulled and its entrypoint inspected
+but **not run with real API credentials**. Whether it removes uploaded files itself is unverified (T01.9, T05.6).
+
+---
+
+## Documentation and handover audit (2026-11-24)
+
+Audited task tracking, test reporting, deployment guides, and handover documentation:
+* `tasks.md`: Phase 5 and Phase 6 tasks updated to reflect current implementation and verified status. Explicit
+  Owner-Only Live Acceptance Items table added to delineate items requiring real platforms, physical devices, or
+  production credentials (T00.4, T00.6, T01.1-6, T01.8-9, T06.5-6, T06.9-13, Phase 7).
+* `ops/test-report.md`: Verified suite numbers recorded (941 passed / 3 skipped on Linux Docker, 934 passed / 12 skipped
+  on Windows). All AT01-AT26 acceptance tests cited exist, and all live statuses remain explicitly marked "not run".
+  `tests/unit/test_report_references.py` passes 3/3.
+* `README.md`: Handover and Owner Acceptance section added with complete document cross-references (`PRD.md`,
+  `architecture.md`, `tasks.md`, `ops/deploy.md`, `ops/troubleshooting.md`, `ops/test-report.md`, `ops/dev-log.md`,
+  `ops/feasibility.md`).
+* Lint, formatting, and secret scan: `ruff check` (clean), `ruff format --check` (clean), `scan_secrets.py --all`
+  (clean, 168 files checked).
+
+---
+
+## Migration to native Windows and Linux VPS (Docker removed) (2026-11-25)
+
+Removed Docker/Compose deployment files in favor of native Python 3.12 (`uv` + `.venv`) execution on both Windows
+(`start-bot.bat`) and Linux VPS (`ops/setup-ubuntu.sh` + hardened `tmd-bot.service` `systemd` unit). Historical
+2026-11-24 entries above are preserved verbatim as the factual record of when those checks ran.
+
+* **Deleted Docker-only artifacts:** `Dockerfile`, `.dockerignore`, `compose.yaml`, `ops/compose.instagram.yaml`,
+  `ops/verify-isolation.sh`, `ops/init-secrets.sh`, `requirements-dev.lock` (`requirements.lock` retained for
+  `tests/unit/test_dependency_pins.py`).
+* **Native runtime & security alignment:** `APP_ENV=production` now permits single-process `WORKER_MODE=inprocess`
+  while retaining production token/auth/chat guards (and strong worker-secret guards when `WORKER_MODE=remote`);
+  optional pure-Python worker (`app.extractors.service`), egress proxy (`app.services.egress_proxy`), and local Bot API
+  default to loopback (`127.0.0.1`); `ops/setup-ubuntu.sh` uses an unprivileged `tmd` user when run directly as root,
+  preserves `.env` edits, sets `APP_ENV=production`, and installs a hardened `tmd-bot.service` unit.
+* **Documentation updated:** `README.md`, `ops/deploy.md`, `ops/troubleshooting.md`, `ops/test-report.md`,
+  `architecture.md`, `PRD.md`, `tasks.md`, and `ops/feasibility.md` updated for native Windows + Linux VPS operation
+  with zero active Docker/Compose instructions or broken file references.

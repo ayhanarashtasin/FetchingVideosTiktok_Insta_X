@@ -48,6 +48,7 @@ GD_OPTIONS = {
     "expand": "false",
     "previews": "false",
     "twitpic": "false",
+    "ratelimit": "abort",
 }
 
 
@@ -109,6 +110,7 @@ class TwitterAdapter:
                 "gallerydl",
                 nums={i.num - 1: i.num for i in items},
                 schemes={i.num - 1: i.scheme for i in items},
+                urls={i.num - 1: (i.url, i.extension) for i in items if i.url},
                 hint="tweet",
             ),
         )

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 
+import pytest
 from aiogram.exceptions import TelegramBadRequest, TelegramNetworkError, TelegramRetryAfter
 from aiogram.methods import GetMe, GetUpdates
 
@@ -11,7 +12,7 @@ from app.bot import messages
 from app.bot.messages import FinalReport
 from app.bot.notifier import TelegramNotifier
 from app.core.contracts import JobState
-from app.main import TrackingSession, build_dispatcher
+from app.main import TrackingSession, build_dispatcher, warn_missing_media_tools
 from app.storage.db import Database
 from tests.fakes import FakeSession, make_bot
 from tests.harness import build_app
@@ -52,25 +53,23 @@ async def test_ack_and_first_runner_status_race_creates_exactly_one_message():
 
 
 async def test_progress_edits_the_same_message_and_skips_identical_text():
-    n, session, job, _, _ = setup()
+    n, session, job, db, _ = setup()
     await n.ack(job)
-    await n.status(job, messages.PREPARING)
-    await n.status(job, messages.PREPARING)  # duplicate: no second edit
     await n.status(job, messages.SENDING)
-    assert [c.text for c in session.of("EditMessageText")] == [messages.PREPARING, messages.SENDING]
-    assert len({c.message_id for c in session.of("EditMessageText")}) == 1
+    await n.status(job, messages.SENDING)
+    (edit,) = session.of("EditMessageText")
+    assert edit.text == messages.SENDING and edit.message_id == db.get_job(job.id).status_message_id
 
 
 async def test_edits_are_throttled_to_avoid_chat_spam():
     t = {"now": 100.0}
     n, session, job, _, sleeps = setup(min_interval=2.0, clock=lambda: t["now"])
     await n.ack(job)
-    await n.status(job, messages.PREPARING)  # immediately after the ack: must wait
-    assert sleeps and 1.9 <= sleeps[0] <= 2.0
-    t["now"] += 5
-    sleeps.clear()
     await n.status(job, messages.SENDING)
-    assert sleeps == []  # enough time has passed
+    assert sleeps == [] and session.of("EditMessageText") == []
+    t["now"] += 5
+    await n.status(job, messages.SENDING)
+    assert sleeps == [] and len(session.of("EditMessageText")) == 1
 
 
 async def test_success_removes_the_status_message():
@@ -180,3 +179,85 @@ def test_two_dispatchers_can_coexist_each_with_fresh_routers(tmp_path):
 
 def test_helpers_are_unused_imports_free():
     assert FakeSession is not None
+
+
+def test_warn_missing_media_tools_logs_cross_platform_hints(caplog):
+    import logging
+
+    caplog.set_level(logging.WARNING, logger="app.main")
+    missing = warn_missing_media_tools(which=lambda name: "/usr/bin/ffprobe" if name == "ffprobe" else None)
+    assert missing == ["ffmpeg"]
+    assert len(caplog.records) == 1
+    msg = caplog.records[0].getMessage()
+    assert "winget install Gyan.FFmpeg" in msg and "sudo apt install ffmpeg" in msg
+    assert caplog.records[0].fields["missing"] == "ffmpeg"
+
+
+def test_warn_missing_media_tools_is_silent_when_present(caplog):
+    import logging
+
+    caplog.set_level(logging.WARNING, logger="app.main")
+    assert warn_missing_media_tools(which=lambda name: f"/usr/bin/{name}") == []
+    assert caplog.records == []
+
+
+# --- fatal startup errors never reach the default traceback printer --------------------------------------------------
+@pytest.fixture
+def startup_env(monkeypatch, tmp_path):
+    from tests.conftest import fake_bot_token
+
+    monkeypatch.setenv("BOT_TOKEN", fake_bot_token())
+    monkeypatch.setenv("ALLOWED_USER_IDS", "111")
+    monkeypatch.setenv("DATA_DIR", str(tmp_path / "data"))
+    monkeypatch.setenv("WORK_DIR", str(tmp_path / "work"))
+    monkeypatch.setenv("APP_ENV", "development")
+
+
+async def test_a_rejected_token_exits_with_a_clear_message_and_code_3(startup_env, monkeypatch, capsys):
+    from aiogram.exceptions import TelegramUnauthorizedError
+    from aiogram.methods import GetMe
+
+    import app.main as main_mod
+
+    async def rejected(settings, **kw):
+        raise TelegramUnauthorizedError(method=GetMe(), message="Unauthorized")
+
+    monkeypatch.setattr(main_mod, "run", rejected)
+    with pytest.raises(SystemExit) as exc:
+        await main_mod.amain()
+    err = capsys.readouterr().err  # setup_logging owns the root handlers, so the JSON line lands on stderr
+    assert exc.value.code == 3
+    assert "rejected the bot token" in err and "Traceback" not in err
+
+
+async def test_any_other_fatal_error_is_logged_redacted_and_exits_1(startup_env, monkeypatch, capsys):
+    import io
+    import logging
+
+    import app.main as main_mod
+    from tests.conftest import fake_bot_token
+
+    token = fake_bot_token()
+
+    async def explode(settings, **kw):
+        # A transport error that embeds the request URL - which contains the bot token.
+        raise RuntimeError(f"cannot reach https://api.telegram.org/bot{token}/getMe")
+
+    monkeypatch.setattr(main_mod, "run", explode)
+    sink = io.StringIO()
+    real_setup = main_mod.setup_logging
+
+    def capture_setup(level, **kw):
+        real_setup(level, **kw)
+        handler = logging.StreamHandler(sink)
+        handler.setFormatter(logging.getLogger().handlers[0].formatter)
+        handler.addFilter(logging.getLogger().handlers[0].filters[0])
+        logging.getLogger().addHandler(handler)
+
+    monkeypatch.setattr(main_mod, "setup_logging", capture_setup)
+    with pytest.raises(SystemExit) as exc:
+        await main_mod.amain()
+    logging.getLogger().handlers.clear()
+    out = sink.getvalue() + capsys.readouterr().err
+    assert exc.value.code == 1
+    assert "fatal error" in out and token not in out, "the token must not survive into any log output"

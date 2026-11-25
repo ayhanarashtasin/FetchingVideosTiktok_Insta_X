@@ -51,7 +51,7 @@ async def app(tmp_path):
 async def test_happy_path_completes_cleans_up_and_removes_the_status_message(app):
     job = await run_one(app)
     assert job.state is JobState.COMPLETED and job.delivered_count == 2 and job.expected_count == 2
-    assert app.notifier.status_texts() == [messages.FETCHING, messages.PREPARING, messages.SENDING]
+    assert app.notifier.status_texts() == [messages.FETCHING, messages.SENDING]
     ((_, report),) = app.notifier.finals
     assert report.state is JobState.COMPLETED and messages.final_text(report) is None  # status message removed
     assert not (app.settings.work_dir / job.id).exists(), "workspace must be gone after completion"

@@ -1,4 +1,4 @@
-# Force LF everywhere: files are mounted into Linux containers and shell scripts must not gain CRs.
+# Force LF everywhere so shell scripts and source files stay clean across Windows and Linux VPS deployments.
 * text=auto eol=lf
 
 *.png binary

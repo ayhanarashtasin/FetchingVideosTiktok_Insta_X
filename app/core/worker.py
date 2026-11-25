@@ -51,6 +51,12 @@ class RunContext:
     outcome: DeliveryOutcome | None = None
     error: BotError | None = None
     state: JobState | None = None
+    resolve_s: float | None = None
+    discover_s: float | None = None
+    fetch_s: float | None = None
+    extraction_s: float | None = None
+    telegram_s: float | None = None
+    status_tasks: list[asyncio.Task[None]] = dataclasses.field(default_factory=list)
 
 
 def decide_final_state(result: ExtractionResult, outcome: DeliveryOutcome) -> JobState:
@@ -130,24 +136,35 @@ class JobRunner:
         if shutdown:
             raise asyncio.CancelledError
 
+    def _fire_status(self, ctx: RunContext, job, text: str) -> None:
+        """Send a progress update without blocking extraction or upload on Telegram RTT."""
+        ctx.status_tasks.append(asyncio.create_task(self.notifier.status(job, text), name=f"status-{job.id[:8]}"))
+
     # ------------------------------------------------------------------ pipeline
     async def _pipeline(self, handle: JobHandle, workspace: Path, ctx: RunContext) -> None:
         job_id = handle.job.id
         job = self.db.get_job(job_id) or handle.job
-        await self.notifier.status(job, messages.FETCHING)
+        self._fire_status(ctx, job, messages.FETCHING)
 
-        ctx.result = await self._extract(handle, workspace)
+        start = time.monotonic()
+        try:
+            ctx.result = await self._extract(handle, workspace, ctx)
+        finally:
+            ctx.extraction_s = round(time.monotonic() - start, 1)
         self._raise_if_cancelled(handle)
 
         self.db.transition(job_id, JobState.PREPARING, expected_count=ctx.result.expected_count)
-        await self.notifier.status(job, messages.PREPARING)
         ctx.result = self._validate_assets(workspace, ctx.result)
 
         self.db.transition(job_id, JobState.UPLOADING)
-        await self.notifier.status(job, messages.SENDING)
-        ctx.outcome = await self.deliverer.deliver(
-            self.db.get_job(job_id) or job, handle.request, ctx.result, workspace
-        )
+        self._fire_status(ctx, job, messages.SENDING)
+        start = time.monotonic()
+        try:
+            ctx.outcome = await self.deliverer.deliver(
+                self.db.get_job(job_id) or job, handle.request, ctx.result, workspace
+            )
+        finally:
+            ctx.telegram_s = round(time.monotonic() - start, 1)
         ctx.state = decide_final_state(ctx.result, ctx.outcome)
         if ctx.state is JobState.FAILED:
             code = next(iter(ctx.outcome.failure_codes.values()), ErrorCode.UPLOAD_FAILED)
@@ -159,7 +176,7 @@ class JobRunner:
             raise BotError(ErrorCode.CANCELLED)
 
     # ------------------------------------------------------------------ extraction
-    async def _extract(self, handle: JobHandle, workspace: Path) -> ExtractionResult:
+    async def _extract(self, handle: JobHandle, workspace: Path, ctx: RunContext) -> ExtractionResult:
         s = self.settings
 
         async def attempt() -> ExtractionResult:
@@ -169,7 +186,11 @@ class JobRunner:
                 async with asyncio.timeout(s.extraction_timeout_seconds + 5):
                     validated = handle.validated
                     if validated.kind is UrlKind.SHORT_LINK:
-                        validated = await self.extractor.resolve(validated, deadline)
+                        t0 = time.monotonic()
+                        try:
+                            validated = await self.extractor.resolve(validated, deadline)
+                        finally:
+                            ctx.resolve_s = round(time.monotonic() - t0, 1)
                     request = handle.request.model_copy(
                         update={
                             "extraction_url": validated.extraction_url,
@@ -177,9 +198,17 @@ class JobRunner:
                             "post_hint": validated.post_hint,
                         }
                     )
-                    manifest = await self.extractor.discover(request, workspace, deadline)
+                    t0 = time.monotonic()
+                    try:
+                        manifest = await self.extractor.discover(request, workspace, deadline)
+                    finally:
+                        ctx.discover_s = round(time.monotonic() - t0, 1)
                     self._check_manifest(manifest)
-                    return await self.extractor.fetch(request, manifest, workspace, deadline)
+                    t0 = time.monotonic()
+                    try:
+                        return await self.extractor.fetch(request, manifest, workspace, deadline)
+                    finally:
+                        ctx.fetch_s = round(time.monotonic() - t0, 1)
             except TimeoutError:
                 raise BotError(ErrorCode.DOWNLOAD_TIMEOUT, "hard extraction timeout") from None
 
@@ -275,8 +304,17 @@ class JobRunner:
             delivered=job.delivered_count,
             expected=report.expected,
             error_code=error_code.value if isinstance(error_code, ErrorCode) else error_code,
+            resolve_s=ctx.resolve_s,
+            discover_s=ctx.discover_s,
+            fetch_s=ctx.fetch_s,
+            extraction_s=ctx.extraction_s,
+            telegram_s=ctx.telegram_s,
+            media_bytes=sum(asset.size_bytes for asset in ctx.result.assets) if ctx.result is not None else None,
             duration_s=round(time.monotonic() - started, 1),
         )
+        if ctx.status_tasks:
+            await asyncio.gather(*ctx.status_tasks, return_exceptions=True)
+            ctx.status_tasks.clear()
         try:
             await self.notifier.finish(job, report)
         except Exception as exc:

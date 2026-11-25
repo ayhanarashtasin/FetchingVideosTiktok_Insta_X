@@ -8,7 +8,9 @@ and a battery of hostile requests that must be rejected BEFORE the backend (and 
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import os
+import stat
 import sys
 import uuid
 from pathlib import Path
@@ -24,7 +26,8 @@ from app.core.errors import BotError, ErrorCode
 from app.core.url_validator import validate_url
 from app.extractors.local import LocalExtractionBackend
 from app.extractors.remote import RemoteExtractionBackend
-from app.extractors.service import create_app
+from app.extractors.service import RUNNER_OPTIONS, create_app
+from app.extractors.session_file import COOKIES_NAME
 from app.extractors.wire import SECRET_HEADER
 from tests.conftest import fake_bot_token, requires_ffmpeg
 from tests.fake_tools import FakeToolRunner
@@ -82,7 +85,9 @@ class Svc:
         self.backend = backend
         self.root = root or tmp_path / "jobs"
         self.root.mkdir(parents=True, exist_ok=True)
-        self.runner = web.AppRunner(create_app(backend, secret=secret, work_root=self.root, concurrency=concurrency))
+        self.runner = web.AppRunner(
+            create_app(backend, secret=secret, work_root=self.root, concurrency=concurrency), **RUNNER_OPTIONS
+        )
         self.url = ""
 
     async def start(self):
@@ -385,8 +390,6 @@ async def test_a_full_carousel_round_trip_through_the_worker_equals_the_in_proce
 async def test_the_whole_bot_works_unchanged_across_the_worker_boundary(tmp_path, media):
     """The real bot (polling, queue, runner, sender) drives a real worker service over HTTP; Telegram is the fake
     HTTP server. Byte-exact delivery proves nothing was lost or altered crossing the isolation boundary."""
-    import json
-
     from tests.e2e import start_e2e
 
     tools = FakeToolRunner()
@@ -411,14 +414,109 @@ async def test_the_whole_bot_works_unchanged_across_the_worker_boundary(tmp_path
         assert sent == [media.jpg.read_bytes(), media.mp4_h264_aac.read_bytes(), media.png.read_bytes()]
         (job,) = e.jobs()
         assert job["state"] == "COMPLETED" and job["delivered_count"] == 3
-        assert e.server.calls_of("sendMessage")[-1].fields["text"] == f"Original link: {IG_POST}"
-        assert (
-            json.loads(e.server.calls_of("sendMessage")[-1].fields["reply_markup"])["inline_keyboard"][0][0]["text"]
-            == "Original files"
-        )
+        assert items[0]["caption"] == f"{IG_POST}\n240p/120p/100p\nOriginal files: /orig_{job['id']}"
+        assert len(e.server.calls_of("sendMessage")) == 1  # only the initial status ack, no closing link message
         assert tools.calls_to("gallery_dl"), "the extraction really ran inside the worker service"
         assert list(e.settings.work_dir.glob("*")) == []
     finally:
         await e.stop()
         for service in services:
             await service.stop()
+
+
+def fetch_body(ws: Path, *, remaining_seconds: float) -> dict:
+    from app.core.contracts import Access, ItemDescriptor, ItemKind, Platform, PostType
+
+    manifest = PostManifest(
+        platform=Platform.INSTAGRAM,
+        post_id="ABCdef12345",
+        post_type=PostType.PHOTO,
+        access=Access.PERMITTED_PUBLIC,
+        expected_count=1,
+        items=[ItemDescriptor(source_item_id="1", position=0, kind=ItemKind.PHOTO)],
+    )
+    return {
+        "request": request_for().model_dump(mode="json"),
+        "manifest": manifest.model_dump(mode="json"),
+        "workspace": str(ws),
+        "remaining_seconds": remaining_seconds,
+    }
+
+
+# --- cancellation reaches the tools ---------------------------------------------------------------------------------
+class HangingBackend:
+    """A backend whose fetch never finishes on its own; records whether it was cancelled."""
+
+    def __init__(self) -> None:
+        self.started = asyncio.Event()
+        self.cancelled = asyncio.Event()
+
+    async def resolve(self, validated, deadline):
+        return validated
+
+    async def discover(self, request, workspace, deadline):
+        raise AssertionError("not used")
+
+    async def fetch(self, request, manifest, workspace, deadline):
+        self.started.set()
+        try:
+            await asyncio.sleep(3600)
+        except asyncio.CancelledError:
+            self.cancelled.set()
+            raise
+
+    async def health(self) -> bool:
+        return True
+
+    async def aclose(self) -> None:
+        return None
+
+
+async def test_when_the_bot_hangs_up_the_workers_job_is_cancelled_so_the_tool_tree_gets_killed(tmp_path):
+    """User /cancel and shutdown close the HTTP request. aiohttp keeps running the handler unless told otherwise;
+    with `handler_cancellation` the cancellation reaches the subprocess runner (which kills the whole tree)."""
+    backend = HangingBackend()
+    svc = await Svc(backend, tmp_path).start()
+    try:
+        ws = svc.job_dir()
+        body = fetch_body(ws, remaining_seconds=600)
+        async with aiohttp.ClientSession() as session:
+            call = asyncio.create_task(session.post(f"{svc.url}/v1/fetch", json=body, headers={SECRET_HEADER: SECRET}))
+            await asyncio.wait_for(backend.started.wait(), 10)
+            call.cancel()  # the client hangs up mid-request
+            with contextlib.suppress(asyncio.CancelledError):
+                await call
+        await asyncio.wait_for(backend.cancelled.wait(), 10)  # the worker noticed and stopped the job
+    finally:
+        await svc.stop()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX permission bits")
+async def test_the_worker_hands_the_job_directory_back_removable_even_when_a_tool_used_a_tight_umask(tmp_path):
+    """The bot (another uid, same group) must be able to read the files and delete the directory afterwards."""
+
+    class TightUmaskBackend(HangingBackend):
+        async def fetch(self, request, manifest, workspace, deadline):
+            old = os.umask(0o077)  # a tool that creates things for its own user only
+            try:
+                sub = workspace / "gd"
+                sub.mkdir()
+                (sub / "001.jpg").write_bytes(b"x")
+                (workspace / ".home").mkdir()
+                (workspace / ".home" / COOKIES_NAME).write_bytes(b"secret-session")
+                os.chmod(workspace / ".home" / COOKIES_NAME, 0o600)
+            finally:
+                os.umask(old)
+            raise BotError(ErrorCode.NOT_FOUND_OR_EXPIRED)  # failure paths must hand back too
+
+    svc = await Svc(TightUmaskBackend(), tmp_path).start()
+    try:
+        ws = svc.job_dir()
+        status, _ = await svc.post("/v1/fetch", fetch_body(ws, remaining_seconds=60))
+        assert status == 409
+        assert stat.S_IMODE((ws / "gd").stat().st_mode) & 0o070 == 0o070
+        assert stat.S_IMODE((ws / "gd" / "001.jpg").stat().st_mode) & 0o060 == 0o060
+        assert stat.S_IMODE((ws / ".home" / COOKIES_NAME).stat().st_mode) == 0o600, "the session copy stays private"
+        assert not stat.S_IMODE((ws / "gd").stat().st_mode) & 0o007, "never world-accessible"
+    finally:
+        await svc.stop()

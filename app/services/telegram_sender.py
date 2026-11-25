@@ -19,9 +19,12 @@ Principles
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import os
-from collections.abc import AsyncGenerator, Awaitable, Callable
+import time
+from collections import OrderedDict
+from collections.abc import AsyncGenerator, Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -44,6 +47,7 @@ from aiogram.types import (
     InputMediaDocument,
     InputMediaPhoto,
     InputMediaVideo,
+    Message,
     ReplyParameters,
 )
 
@@ -59,12 +63,16 @@ from app.core.contracts import (
 from app.core.errors import BotError, ErrorCode
 from app.logging_setup import log_event
 from app.media.delivery_plan import Caps, DeliveryPlan, PlannedItem, SendAs, Step, plan_delivery
+from app.media.probe import HASH_VIDEO_LIMIT
 from app.services.cleanup import WorkspaceManager
 from app.storage.db import Database
 
 log = logging.getLogger(__name__)
 MAX_FLOOD_RETRIES = 2
 MAX_FLOOD_WAIT = 60.0
+RECENT_FILE_LIMIT = 128
+
+type FileKey = tuple[int, int, SendAs, str | None, str | None]
 
 
 class FdInputFile(InputFile):
@@ -75,21 +83,32 @@ class FdInputFile(InputFile):
         super().__init__(filename=filename, chunk_size=chunk_size)
         self._fd = fd
         self._size = size
+        self.read_sha256: str | None = None
+
+    @property
+    def size(self) -> int:
+        return self._size
 
     def _read_at(self, offset: int, n: int) -> bytes:
         if hasattr(os, "pread"):
             return os.pread(self._fd, n, offset)
-        os.lseek(self._fd, offset, os.SEEK_SET)  # Windows (development only)
+        os.lseek(self._fd, offset, os.SEEK_SET)  # Windows: os.pread unavailable
         return os.read(self._fd, n)
 
     async def read(self, bot: Bot) -> AsyncGenerator[bytes, None]:
+        self.read_sha256 = None
+        digest = hashlib.sha256() if self._size <= HASH_VIDEO_LIMIT else None
         offset = 0
         while offset < self._size:
             chunk = await asyncio.to_thread(self._read_at, offset, min(self.chunk_size, self._size - offset))
             if not chunk:
                 break
             offset += len(chunk)
+            if digest is not None:
+                digest.update(chunk)
             yield chunk
+        if digest is not None and offset == self._size:
+            self.read_sha256 = digest.hexdigest()
 
 
 @dataclass
@@ -142,6 +161,7 @@ class TelegramDeliverer:
         self._s = settings
         self._ws = workspaces
         self._sleep = sleep
+        self._file_ids: OrderedDict[FileKey, tuple[str, float]] = OrderedDict()
 
     # ------------------------------------------------------------------ public
     async def deliver(
@@ -150,7 +170,7 @@ class TelegramDeliverer:
         caps = Caps(
             photo_bytes=self._s.photo_cap_bytes, file_bytes=self._s.file_cap_bytes, native_hevc=self._s.native_hevc
         )
-        plan = plan_delivery(result.assets, mode=job.delivery_mode, caps=caps, url=job.original_url)
+        plan = plan_delivery(result.assets, mode=job.delivery_mode, caps=caps, url=job.original_url, job_id=job.id)
         acc = _Accumulator()
         for r in plan.rejected:
             acc.failed[r.position] = r.code
@@ -197,7 +217,7 @@ class TelegramDeliverer:
             except BotError as err:
                 return StepResult("failed", code=err.code)
             try:
-                return await self._attempt(job, step.items, step.caption, files, keyboard, first)
+                return await self._send_files(job, step.items, step.caption, files, keyboard, first)
             except BotError:
                 raise
             except TelegramBadRequest:
@@ -209,7 +229,7 @@ class TelegramDeliverer:
                     PlannedItem(i.asset, SendAs.DOCUMENT, "telegram rejected the native upload") for i in step.items
                 )
                 try:
-                    return await self._attempt(job, as_docs, step.caption, files, keyboard, first)
+                    return await self._send_files(job, as_docs, step.caption, files, keyboard, first)
                 except BotError:
                     raise
                 except Exception as exc:
@@ -239,7 +259,7 @@ class TelegramDeliverer:
             files.append(FdInputFile(fd, name, a.size_bytes))
         return files
 
-    async def _attempt(
+    async def _send_files(
         self,
         job: JobRecord,
         items: tuple[PlannedItem, ...],
@@ -248,13 +268,65 @@ class TelegramDeliverer:
         keyboard: InlineKeyboardMarkup | None,
         first: bool,
     ) -> StepResult:
+        keys: list[FileKey] = []
+        sources: list[FdInputFile | str] = []
+        for item, file in zip(items, files, strict=True):
+            key = (job.owner_id, job.chat_id, item.send_as, file.filename, item.asset.sha256)
+            keys.append(key)
+            cached = self._file_ids.get(key)
+            if cached is not None and cached[1] > time.monotonic():
+                # Verify the current bytes from the open descriptor before reusing Telegram's copy.
+                async for _ in file.read(self._bot):
+                    pass
+                if file.read_sha256 == item.asset.sha256:
+                    sources.append(cached[0])
+                    continue
+            sources.append(file)
+
+        try:
+            sent = await self._attempt(job, items, caption, sources, keyboard, first)
+        except TelegramBadRequest:
+            reused = [key for key, source in zip(keys, sources, strict=True) if isinstance(source, str)]
+            if not reused:
+                raise
+            for key in reused:
+                self._file_ids.pop(key, None)
+            # A 400 is a definite rejection. Retry with the validated files before changing media type.
+            sources = list(files)
+            sent = await self._attempt(job, items, caption, sources, keyboard, first)
+
+        if len(sent) == len(items):
+            expires = time.monotonic() + self._s.job_metadata_ttl_hours * 3600
+            for key, source, message in zip(keys, sources, sent, strict=True):
+                if isinstance(source, str) or source.read_sha256 is None or source.read_sha256 != key[-1]:
+                    continue
+                media = getattr(message, key[2].value)
+                if isinstance(media, list):
+                    media = media[-1] if media else None
+                if media is not None and media.file_id:
+                    self._file_ids[key] = (media.file_id, expires)
+                    self._file_ids.move_to_end(key)
+                    if len(self._file_ids) > RECENT_FILE_LIMIT:
+                        self._file_ids.popitem(last=False)
+
+        return StepResult("sent", message_ids=[msg.message_id for msg in sent])
+
+    async def _attempt(
+        self,
+        job: JobRecord,
+        items: tuple[PlannedItem, ...],
+        caption: str | None,
+        files: Sequence[FdInputFile | str],
+        keyboard: InlineKeyboardMarkup | None,
+        first: bool,
+    ) -> list[Message]:
         reply = ReplyParameters(message_id=job.origin_message_id, allow_sending_without_reply=True) if first else None
         timeout = self._s.upload_timeout_seconds
         common: dict[str, Any] = {"chat_id": job.chat_id, "request_timeout": timeout}
         if reply is not None:
             common["reply_parameters"] = reply
 
-        async def call() -> list[int]:
+        async def call() -> list[Message]:
             if len(items) == 1:
                 item, file = items[0], files[0]
                 a = item.asset
@@ -269,7 +341,7 @@ class TelegramDeliverer:
                     )  # fmt: skip
                 else:
                     msg = await self._bot.send_document(document=file, disable_content_type_detection=True, **single)
-                return [msg.message_id]
+                return [msg]
             media: list[InputMediaPhoto | InputMediaVideo | InputMediaDocument] = []
             for index, (item, file) in enumerate(zip(items, files, strict=True)):
                 cap = caption if index == 0 else None  # a media group shows the first item's caption
@@ -286,13 +358,11 @@ class TelegramDeliverer:
                     )  # fmt: skip
                 else:
                     media.append(InputMediaDocument(media=file, caption=cap, disable_content_type_detection=True))
-            sent = await self._bot.send_media_group(media=media, **common)
-            return [m.message_id for m in sent]
+            return await self._bot.send_media_group(media=media, **common)
 
-        ids = await self._with_flood_wait(call)
-        return StepResult("sent", message_ids=ids)
+        return await self._with_flood_wait(call)
 
-    async def _with_flood_wait(self, call: Callable[[], Awaitable[list[int]]]) -> list[int]:
+    async def _with_flood_wait(self, call: Callable[[], Awaitable[list[Message]]]) -> list[Message]:
         """Retry ONLY on 429: Telegram guarantees it processed nothing, so repeating cannot duplicate."""
         for attempt in range(MAX_FLOOD_RETRIES + 1):
             try:

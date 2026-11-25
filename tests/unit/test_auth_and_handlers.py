@@ -43,7 +43,7 @@ async def test_unauthorized_messages_cause_zero_work(app, update_kwargs):
 
 
 async def test_unauthorized_commands_are_ignored_too(app):
-    for text in ("/start", "/help", "/settings", "/cancel"):
+    for text in ("/start", "/help", "/settings", "/cancel", "/orig_" + "a" * 32):
         await app.feed(message_update(text, user_id=999))
     assert app.session.calls == []
 

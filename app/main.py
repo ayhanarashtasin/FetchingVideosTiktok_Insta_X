@@ -14,17 +14,22 @@ import asyncio
 import contextlib
 import logging
 import os
+import shutil
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import timedelta
+from typing import Any
 
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.client.telegram import TelegramAPIServer
+from aiogram.exceptions import TelegramUnauthorizedError
 from aiogram.methods import GetUpdates, TelegramMethod
-from aiogram.types import ReplyParameters
+from aiogram.types import InputFile, ReplyParameters
+from aiohttp import FormData, TCPConnector
+from aiohttp.payload import AsyncIterablePayload
 
 from app.bot import callbacks, handlers, messages
 from app.bot.auth import AuthMiddleware
@@ -36,6 +41,7 @@ from app.config import Settings
 from app.core.contracts import JobRecord
 from app.core.errors import ConfigError
 from app.core.job_queue import JobQueue
+from app.core.net_guard import tuned_socket_factory
 from app.core.ports import ExtractionBackend
 from app.core.url_validator import parse_hosts_config
 from app.core.worker import JobRunner
@@ -51,10 +57,43 @@ HOUSEKEEPING_INTERVAL = 30.0
 POLL_WATCHDOG_SECONDS = 300.0
 
 
+class _SizedAsyncPayload(AsyncIterablePayload):
+    """AsyncIterablePayload with a pre-verified byte size so aiohttp sends Content-Length."""
+
+    def __init__(self, value: Any, *, size: int, **kwargs: Any) -> None:
+        super().__init__(value, **kwargs)
+        self._size = size
+
+
 class TrackingSession(AiohttpSession):
-    """Remembers when `getUpdates` last succeeded so the health check can detect stalled polling."""
+    """Tracks `getUpdates` liveness and tunes sockets/uploads for high-RTT Telegram uploads."""
 
     last_poll_ok: float | None = None
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        if self._connector_type is TCPConnector:
+            # Keep warm TLS connections across extractions and raise Windows' 64 KiB socket buffers.
+            self._connector_init["keepalive_timeout"] = 60.0
+            self._connector_init["socket_factory"] = tuned_socket_factory
+
+    def build_form_data(self, bot: Bot, method: TelegramMethod) -> FormData:  # type: ignore[override]
+        form = FormData(quote_fields=False)
+        files: dict[str, InputFile] = {}
+        for key, value in method.model_dump(warnings=False).items():
+            prepared = self.prepare_value(value, bot=bot, files=files)
+            if not prepared:
+                continue
+            form.add_field(key, prepared)
+        for key, file_obj in files.items():
+            name = file_obj.filename or key
+            size = getattr(file_obj, "size", None)
+            if isinstance(size, int) and size >= 0:
+                body: Any = _SizedAsyncPayload(file_obj.read(bot), size=size, filename=name)
+            else:
+                body = file_obj.read(bot)
+            form.add_field(key, body, filename=name)
+        return form
 
     async def make_request(
         self,
@@ -86,8 +125,12 @@ def build_bot(settings: Settings) -> Bot:
 
 def build_dispatcher(settings: Settings, ctx: AppContext) -> Dispatcher:
     dp = Dispatcher()
-    # Order matters: authorization first (nothing happens for strangers), then the error boundary.
-    dp.update.outer_middleware(AuthMiddleware(settings.allowed_user_ids, private_only=settings.private_chat_only))
+    # Authorization runs before the error boundary can send a reply.
+    dp.update.outer_middleware(
+        AuthMiddleware(
+            settings.allowed_user_ids, private_only=settings.private_chat_only, public_access=settings.public_access
+        )
+    )
     dp.update.outer_middleware(ErrorBoundaryMiddleware())
     dp["ctx"] = ctx
     dp.include_router(callbacks.create_router())
@@ -178,6 +221,20 @@ async def housekeeping(
         await asyncio.sleep(min(HOUSEKEEPING_INTERVAL, float(settings.heartbeat_interval_seconds)))
 
 
+def warn_missing_media_tools(which: Callable[[str], str | None] = shutil.which) -> list[str]:
+    """Log an actionable warning if ffmpeg or ffprobe is missing on PATH. Returns missing tool names."""
+    missing = [tool for tool in ("ffmpeg", "ffprobe") if which(tool) is None]
+    if missing:
+        log_event(
+            log,
+            logging.WARNING,
+            "required media tool(s) not found on PATH: video probing/merging/remuxing will fail "
+            "(Windows: `winget install Gyan.FFmpeg`; Ubuntu/Debian: `sudo apt install ffmpeg`)",
+            missing=",".join(missing),
+        )
+    return missing
+
+
 async def amain() -> None:
     settings = Settings()
     setup_logging(settings.log_level)
@@ -186,7 +243,18 @@ async def amain() -> None:
     except ConfigError as exc:
         log_event(log, logging.CRITICAL, "refusing to start: invalid configuration", problems=str(exc))
         raise SystemExit(2) from exc
-    await run(settings)
+    try:
+        await run(settings)
+    except TelegramUnauthorizedError:
+        log_event(
+            log, logging.CRITICAL, "Telegram rejected the bot token (wrong or revoked): fix the secret and restart"
+        )
+        raise SystemExit(3) from None
+    except Exception:
+        # Never let the interpreter print a raw traceback: it bypasses redaction, and a transport error can embed a
+        # request URL (which contains the bot token). Only the redacting logger may write error text.
+        log.critical("fatal error", exc_info=True)
+        raise SystemExit(1) from None
 
 
 async def run(
@@ -197,10 +265,12 @@ async def run(
 ) -> None:
     """Wire everything together and poll until stopped. Separate from `amain` so tests can run the
     REAL startup/shutdown path against a fake Telegram server with an injected extractor."""
-    if not settings.allowed_user_ids:
+    if settings.public_access:
+        log_event(log, logging.INFO, "public access enabled for private chats")
+    elif not settings.allowed_user_ids:
         log_event(log, logging.WARNING, "ALLOWED_USER_IDS is empty: every request will be rejected")
     if settings.worker_mode == "inprocess":
-        log_event(log, logging.WARNING, "extractor runs IN-PROCESS: development mode, not production-isolated")
+        warn_missing_media_tools()
 
     # Imported here so that `import app.main` works for tests that only need the helpers above.
     from app.extractors.factory import build_extraction_backend
@@ -301,7 +371,8 @@ async def run(
 
 
 def main() -> None:
-    asyncio.run(amain())
+    with contextlib.suppress(KeyboardInterrupt):
+        asyncio.run(amain())
 
 
 if __name__ == "__main__":

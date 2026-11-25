@@ -22,8 +22,8 @@ from app.core.url_validator import ValidatedUrl
 
 
 class ExtractionBackend(Protocol):
-    """Untrusted-world side: resolves, discovers and downloads. In production it lives in the
-    isolated worker container; in development it runs in-process behind the same interface."""
+    """Untrusted-world side: resolves, discovers and downloads. Runs in-process by default
+    (`LocalExtractionBackend`) or behind the optional separate worker service (`RemoteExtractionBackend`)."""
 
     async def resolve(self, validated: ValidatedUrl, deadline: Deadline) -> ValidatedUrl:
         """Follow a short link safely and return the validated exact-post URL."""

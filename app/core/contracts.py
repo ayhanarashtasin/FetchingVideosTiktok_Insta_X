@@ -190,6 +190,7 @@ class MediaAsset(_Model):
     processing: Processing = Processing.UNCHANGED
     container: str | None = None
     pix_fmt: str | None = None
+    quality_note: str | None = None
 
     @field_validator("local_path")
     @classmethod

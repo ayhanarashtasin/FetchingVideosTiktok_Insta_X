@@ -19,7 +19,15 @@ from typing import Any
 
 from app.core.deadline import Deadline
 from app.core.errors import BotError, ErrorCode
-from app.extractors.classify import GdError, GdWarnings, classify_gallerydl, classify_text, scan_gallerydl_warnings
+from app.extractors.classify import (
+    GdError,
+    GdWarnings,
+    classify_gallerydl,
+    classify_text,
+    scan_gallerydl_warnings,
+    strip_log_noise,
+)
+from app.extractors.session_file import private_cookie_copy
 from app.services.subprocess_runner import ProcessRunner, sanitized_env
 
 MAX_DUMP_BYTES = 8_000_000
@@ -65,12 +73,12 @@ def parse_dump(stdout: str) -> tuple[list[dict[str, Any]], list[dict[str, Any]],
         if kind == 2 and isinstance(msg[-1], dict):
             directories.append(msg[-1])
         elif kind == 3 and len(msg) >= 3 and isinstance(msg[2], dict):
+            raw_url = msg[1] if isinstance(msg[1], str) else ""
             files.append(
                 {
                     **msg[2],
-                    "_scheme": str(msg[1]).split(":", 1)[0]
-                    if isinstance(msg[1], str) and msg[1].startswith("ytdl:")
-                    else "",
+                    "_url": raw_url,
+                    "_scheme": raw_url.split(":", 1)[0] if raw_url.startswith("ytdl:") else "",
                 }
             )
         elif kind == -1 and isinstance(msg[-1], dict):
@@ -115,7 +123,11 @@ class GalleryDlRunner:
         home.mkdir(exist_ok=True)
         return home
 
-    def _base(self, options: Mapping[str, str], *, use_cookies: bool) -> list[str]:
+    def _session(self, workspace: Path, use_cookies: bool) -> Path | None:
+        """A private per-job copy of the session file, or None when this call must stay anonymous."""
+        return private_cookie_copy(self._cookies, self._home(workspace)) if use_cookies else None
+
+    def _base(self, options: Mapping[str, str], *, cookies: Path | None) -> list[str]:
         args = [
             self._python,
             "-m",
@@ -129,8 +141,9 @@ class GalleryDlRunner:
         ]
         if self._proxy:
             args += ["--proxy", self._proxy]
-        if use_cookies and self._cookies is not None:
-            args += ["--cookies", str(self._cookies)]
+        if cookies is not None:
+            # `cookies-update=false`: never write the (private copy of the) session back out.
+            args += ["--cookies", str(cookies), "-o", "cookies-update=false"]
         return args
 
     async def discover(
@@ -151,7 +164,7 @@ class GalleryDlRunner:
         `allow_empty` is for extractors that legitimately yield only a Directory record (e.g. a
         profile `/info`); everywhere else an empty result is an error.
         """
-        args = [*self._base(options, use_cookies=use_cookies), "--dump-json", "--", url]
+        args = [*self._base(options, cookies=self._session(workspace, use_cookies)), "--dump-json", "--", url]
         res = await self._runner.run(
             args,
             cwd=workspace,
@@ -166,14 +179,19 @@ class GalleryDlRunner:
         stderr = res.stderr_text()
         directories, files, errors = parse_dump(res.stdout_text())
         warnings = scan_gallerydl_warnings(stderr)
+        clean_stderr = strip_log_noise(stderr)
         if errors or (res.returncode not in (0, None) and not files):
-            raise classify_gallerydl(errors, res.returncode, stderr, session_supported=session_supported, hint=hint)
-        if not files and empty_means_no_media and not errors and res.returncode in (0, None) and not stderr.strip():
+            raise classify_gallerydl(
+                errors, res.returncode, clean_stderr or stderr, session_supported=session_supported, hint=hint
+            )
+        if not files and empty_means_no_media and not errors and res.returncode in (0, None) and not clean_stderr:
             # The extractor ran cleanly and simply found nothing to download (e.g. a text-only post).
             raise BotError(ErrorCode.UNSUPPORTED_POST, "post has no photos or videos", reason="no_media")
         if not files and not (allow_empty and directories):
             # Extractors such as TikTok's log failures instead of raising, so "no items" is an error.
-            raise classify_text(stderr or "no items extracted", session_supported=session_supported, hint=hint)
+            raise classify_text(
+                clean_stderr or stderr or "no items extracted", session_supported=session_supported, hint=hint
+            )
         return GdDump(directories, files, errors, warnings, res.returncode, stderr)
 
     async def download(
@@ -197,7 +215,13 @@ class GalleryDlRunner:
         out = workspace / subdir
         out.mkdir(exist_ok=True)
         args = [
-            *self._base(options, use_cookies=use_cookies),
+            *self._base(options, cookies=self._session(workspace, use_cookies)),
+            "-o",
+            "downloader.http.consume-content=true",
+            "-o",
+            "downloader.http.chunk-size=262144",
+            "-o",
+            "downloader.ytdl.raw-options.concurrent_fragments=8",
             "--directory",
             str(out),
             "--filename",
@@ -228,5 +252,8 @@ class GalleryDlRunner:
                 continue  # anything we did not name ourselves is ignored, never sent
             files[int(m.group(1))] = p
         if not files:
-            raise classify_gallerydl([], res.returncode, stderr, session_supported=session_supported, hint=hint)
+            clean_stderr = strip_log_noise(stderr)
+            raise classify_gallerydl(
+                [], res.returncode, clean_stderr or stderr, session_supported=session_supported, hint=hint
+            )
         return GdDownload(files, res.returncode, scan_gallerydl_warnings(stderr), stderr)

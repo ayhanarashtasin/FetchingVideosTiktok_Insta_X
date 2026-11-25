@@ -22,6 +22,7 @@ def test_documented_defaults():
     s = settings()
     assert s.default_delivery_mode is DeliveryMode.MEDIA
     assert s.private_chat_only is True
+    assert s.public_access is False
     assert (s.max_concurrent_jobs, s.max_active_jobs_per_user, s.max_queue_size) == (2, 1, 10)
     assert s.max_items_per_job == 30
     assert s.extraction_timeout_seconds == 120
@@ -32,8 +33,21 @@ def test_documented_defaults():
     assert s.job_metadata_ttl_hours == 24
     assert s.orphan_ttl_minutes == 30
     assert s.worker_mode == "inprocess"
+    assert s.worker_host == "127.0.0.1"
+    assert s.worker_url == "http://127.0.0.1:8090"
     assert s.bot_api_mode == "hosted"
+    assert s.local_bot_api_url == "http://127.0.0.1:8081"
     assert s.allowed_user_ids == []
+
+
+def test_loopback_defaults_avoid_public_binds():
+    from app.services.egress_proxy import DEFAULT_LISTEN_HOST
+
+    s = settings()
+    assert s.worker_host == "127.0.0.1"
+    assert s.worker_url == "http://127.0.0.1:8090"
+    assert s.local_bot_api_url == "http://127.0.0.1:8081"
+    assert DEFAULT_LISTEN_HOST == "127.0.0.1"
 
 
 @pytest.mark.parametrize(
@@ -126,20 +140,39 @@ def test_production_requires_allowlist():
         prod(allowed_user_ids=[]).validate_for_startup()
 
 
+def test_production_public_access_requires_no_allowlist(monkeypatch):
+    monkeypatch.setenv("PUBLIC_ACCESS", "true")
+    prod(allowed_user_ids=[]).validate_for_startup()
+
+
 def test_production_requires_private_chat_only():
     with pytest.raises(ConfigError, match="PRIVATE_CHAT_ONLY"):
         prod(private_chat_only=False).validate_for_startup()
 
 
-def test_production_rejects_inprocess_worker():
-    with pytest.raises(ConfigError, match="NOT isolated"):
-        prod(worker_mode="inprocess").validate_for_startup()
+def test_public_access_requires_private_chats_in_development():
+    with pytest.raises(ConfigError, match="PRIVATE_CHAT_ONLY"):
+        good(public_access=True, private_chat_only=False).validate_for_startup()
+
+
+def test_production_allows_inprocess_worker_with_guards_enforced():
+    good(app_env="production", worker_mode="inprocess").validate_for_startup()
+    good(app_env="production", worker_mode="inprocess", public_access=True, allowed_user_ids=[]).validate_for_startup()
+    with pytest.raises(ConfigError, match="ALLOWED_USER_IDS"):
+        good(app_env="production", worker_mode="inprocess", allowed_user_ids=[]).validate_for_startup()
+    with pytest.raises(ConfigError, match="PRIVATE_CHAT_ONLY"):
+        good(app_env="production", worker_mode="inprocess", private_chat_only=False).validate_for_startup()
 
 
 @pytest.mark.parametrize("secret", ["", "short", "replace_me"])
 def test_remote_worker_needs_a_real_secret(secret):
     with pytest.raises(ConfigError, match="WORKER_SECRET"):
         prod(worker_secret=secret).validate_for_startup()
+
+
+def test_remote_worker_needs_a_valid_url():
+    with pytest.raises(ConfigError, match="WORKER_URL"):
+        prod(worker_url="127.0.0.1:8090").validate_for_startup()
 
 
 def test_production_valid_configuration_starts():
@@ -172,7 +205,7 @@ def test_local_api_profile_caps_and_url():
     assert good().file_cap_bytes == 49_000_000
     assert s.photo_cap_bytes == 9_500_000  # photo limit applies on the local profile too
     with pytest.raises(ConfigError, match="LOCAL_BOT_API_URL"):
-        good(bot_api_mode="local", local_bot_api_url="telegram-bot-api:8081").validate_for_startup()
+        good(bot_api_mode="local", local_bot_api_url="127.0.0.1:8081").validate_for_startup()
 
 
 def test_env_example_loads_and_is_not_startable_as_is():
@@ -180,6 +213,9 @@ def test_env_example_loads_and_is_not_startable_as_is():
     s = Settings(_env_file=REPO / ".env.example")
     assert s.allowed_user_ids == [123456789]
     assert s.max_queue_size == 10
+    assert s.local_bot_api_url == "http://127.0.0.1:8081"
+    assert s.worker_url == "http://127.0.0.1:8090"
+    assert s.worker_host == "127.0.0.1"
     with pytest.raises(ConfigError, match="BOT_TOKEN"):
         s.validate_for_startup()
 

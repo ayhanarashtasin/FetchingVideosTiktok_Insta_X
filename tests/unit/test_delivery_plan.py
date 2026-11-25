@@ -15,11 +15,13 @@ from app.media.delivery_plan import (
     caption_for,
     chunk,
     decide,
+    display_url,
     plan_delivery,
 )
 
 WORK = Path(__file__).resolve().parent / "work"  # absolute on every OS; never touched
 URL = "https://www.instagram.com/p/ABCdef12345/?igsh=tracking"
+CLEAN_URL = "https://www.instagram.com/p/ABCdef12345/"
 CAPS = Caps(photo_bytes=9_500_000, file_bytes=49_000_000)
 LOCAL_CAPS = Caps(photo_bytes=9_500_000, file_bytes=1_900_000_000)
 
@@ -81,8 +83,10 @@ def test_hevc_goes_native_only_when_enabled():
 
 
 def test_original_mode_sends_everything_as_documents_unmodified():
-    for a in (photo(0), photo(1, w=40, h=1000), video(2), video(3, container="mkv")):
+    for a in (photo(0), photo(1, w=40, h=1000)):
         assert decide(a, DeliveryMode.ORIGINAL, CAPS).send_as is SendAs.DOCUMENT
+    assert decide(video(2), DeliveryMode.ORIGINAL, CAPS).send_as is SendAs.VIDEO
+    assert decide(video(3, container="mkv"), DeliveryMode.ORIGINAL, CAPS).send_as is SendAs.DOCUMENT
 
 
 # --- size limits: never shrink, report instead (AT17) ----------------------------------------------------------------
@@ -184,17 +188,48 @@ def test_nothing_deliverable_yields_an_empty_plan():
     assert plan.steps == () and plan.link_message is None and not plan.button_on_media and len(plan.rejected) == 1
 
 
-# --- captions + source link + the Original-files button (FR-08, PRD section 4) ----------------------------------------------
+# --- captions + source link + the Original-files button (photos only) ----------------------------------------------
 def test_a_single_item_carries_the_caption_and_the_button_itself():
     plan = plan_delivery([photo(0)], mode=DeliveryMode.MEDIA, caps=CAPS, url=URL)
-    assert plan.steps[0].caption == f"Original link: {URL}"  # the EXACT submitted URL, tracking params and all
+    assert plan.steps[0].caption == f"{CLEAN_URL}\n1080p"  # query stripped + resolution, no extra words
     assert plan.link_message is None and plan.button_on_media and not plan.button_on_link
+
+
+def test_a_single_video_carries_url_and_resolution_without_original_files_button():
+    plan = plan_delivery([video(0)], mode=DeliveryMode.MEDIA, caps=CAPS, url=URL)
+    assert plan.steps[0].caption == f"{CLEAN_URL}\n720p"
+    assert plan.link_message is None and not plan.button_on_media and not plan.button_on_link
+
+
+def test_video_only_album_has_no_original_files_button_or_extra_link_message():
+    plan = plan_delivery([video(0), video(1)], mode=DeliveryMode.MEDIA, caps=CAPS, url=URL)
+    assert plan.steps[0].caption == f"{CLEAN_URL}\n720p"
+    assert plan.link_message is None and not plan.button_on_media and not plan.button_on_link
 
 
 def test_albums_get_a_separate_final_link_message_carrying_the_button():
     plan = plan_delivery([photo(0), photo(1), photo(2)], mode=DeliveryMode.MEDIA, caps=CAPS, url=URL)
-    assert plan.steps[0].caption == f"Original link: {URL}"  # first item of the batch still captioned
-    assert plan.link_message == f"Original link: {URL}" and plan.button_on_link and not plan.button_on_media
+    assert plan.steps[0].caption == f"{CLEAN_URL}\n1080p"  # first item of the batch still captioned
+    assert plan.link_message == f"{CLEAN_URL}\n1080p" and plan.button_on_link and not plan.button_on_media
+
+
+def test_single_album_with_job_id_embeds_original_command_without_link_message():
+    jid = "a" * 32
+    plan = plan_delivery([photo(0), photo(1)], mode=DeliveryMode.MEDIA, caps=CAPS, url=URL, job_id=jid)
+    assert plan.steps[0].caption == f"{CLEAN_URL}\n1080p\nOriginal files: /orig_{jid}"
+    assert plan.link_message is None and not plan.button_on_media and not plan.button_on_link
+
+    # Video-only and Original-mode albums stay single-message without an /orig_ command.
+    vplan = plan_delivery([video(0), video(1)], mode=DeliveryMode.MEDIA, caps=CAPS, url=URL, job_id=jid)
+    assert vplan.steps[0].caption == f"{CLEAN_URL}\n720p" and vplan.link_message is None
+    oplan = plan_delivery([photo(0), photo(1)], mode=DeliveryMode.ORIGINAL, caps=CAPS, url=URL, job_id=jid)
+    assert oplan.steps[0].caption == f"{CLEAN_URL}\n1080p" and oplan.link_message is None
+
+    # A near-limit URL that has room for URL+res but not the /orig_ line falls back to link_message cleanly.
+    long_url = "https://x.com/u/status/" + "1" * (CAPTION_LIMIT - len("https://x.com/u/status/") - 10)
+    fplan = plan_delivery([photo(0), photo(1)], mode=DeliveryMode.MEDIA, caps=CAPS, url=long_url, job_id=jid)
+    assert fplan.steps[0].caption == f"{long_url}\n1080p"
+    assert fplan.link_message == f"{long_url}\n1080p" and fplan.button_on_link
 
 
 def test_multi_step_plans_end_with_a_link_message_even_without_groups():
@@ -217,18 +252,32 @@ def test_original_mode_has_no_original_files_button():
 
 
 def test_a_long_url_is_never_truncated_a_separate_message_carries_it():
-    long_url = "https://x.com/someuser/status/1700000000000?" + "a=1&" * 300
-    assert len(f"Original link: {long_url}") > CAPTION_LIMIT and caption_for(long_url) is None
+    long_url = "https://x.com/someuser/status/" + "1" * 1100
+    assert len(long_url) > CAPTION_LIMIT and caption_for(long_url) is None
     plan = plan_delivery([photo(0)], mode=DeliveryMode.MEDIA, caps=CAPS, url=long_url)
     assert plan.steps[0].caption is None
-    assert plan.link_message == f"Original link: {long_url}"  # full, untruncated
+    assert plan.link_message == f"{long_url}\n1080p"  # full, untruncated
     assert plan.button_on_link and not plan.button_on_media
 
 
+def test_display_url_strips_query_and_fragment():
+    assert (
+        display_url("https://x.com/chetaslua/status/2125253343480275008?a=NvdTtnzQgIR2Hs-1B-k&s=20")
+        == "https://x.com/chetaslua/status/2125253343480275008"
+    )
+    assert (
+        display_url("https://x.com/tradingview/status/2125262489277595826#frag?s=20")
+        == "https://x.com/tradingview/status/2125262489277595826"
+    )
+    assert (
+        display_url("https://x.com/tradingview/status/2125262489277595826")
+        == "https://x.com/tradingview/status/2125262489277595826"
+    )
+
+
 def test_caption_boundary():
-    prefix = len("Original link: ")
-    fits = "https://x.com/" + "a" * (CAPTION_LIMIT - prefix - len("https://x.com/"))
-    assert len(f"Original link: {fits}") == CAPTION_LIMIT and caption_for(fits) is not None
+    fits = "https://x.com/" + "a" * (CAPTION_LIMIT - len("https://x.com/"))
+    assert len(fits) == CAPTION_LIMIT and caption_for(fits) == fits
     assert caption_for(fits + "a") is None
 
 

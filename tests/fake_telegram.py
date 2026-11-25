@@ -203,7 +203,14 @@ class FakeTelegramServer:
             doc = {"file_id": "d", "file_unique_id": "d", "file_name": name, "file_size": len(data)}
             return self._message(chat_id, document=doc, **_caption(call))
         if method == "sendVideo":
-            return self._message(chat_id, **_caption(call))
+            video = {
+                "file_id": "video-file-id",
+                "file_unique_id": "video",
+                "width": int(call.fields.get("width", 0)),
+                "height": int(call.fields.get("height", 0)),
+                "duration": int(call.fields.get("duration", 0)),
+            }
+            return self._message(chat_id, video=video, **_caption(call))
         if method == "sendMediaGroup":
             return [self._message(chat_id) for _ in call.json("media")]
         if method in {"editMessageText", "editMessageReplyMarkup", "editMessageCaption"}:

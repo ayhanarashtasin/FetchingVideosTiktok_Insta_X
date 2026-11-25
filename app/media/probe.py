@@ -176,7 +176,7 @@ async def probe_file(
     exe = ffprobe or shutil.which("ffprobe")
     if not exe:
         raise BotError(ErrorCode.EXTRACTOR_CHANGED, "ffprobe is not installed")
-    result = await (runner or SubprocessRunner()).run(
+    probe_coro = (runner or SubprocessRunner()).run(
         [
             exe,
             "-v",
@@ -194,6 +194,12 @@ async def probe_file(
         timeout=timeout,
         max_stdout=2_000_000,
     )
+    if size <= HASH_VIDEO_LIMIT:
+        # Overlap disk hashing with ffprobe startup/execution so hashing adds ~0 ms wall time.
+        result, digest = await asyncio.gather(probe_coro, asyncio.to_thread(_sha256, path))
+    else:
+        result = await probe_coro
+        digest = None
     if result.timed_out:
         raise BotError(ErrorCode.DOWNLOAD_TIMEOUT, "ffprobe timed out")
     if result.returncode != 0:
@@ -203,8 +209,9 @@ async def probe_file(
     except ValueError:
         raise BotError(ErrorCode.MEDIA_INVALID, "ffprobe output was not JSON") from None
     info = parse_probe(data, path, size)
-    if info.kind is ItemKind.PHOTO or size <= HASH_VIDEO_LIMIT:
+    if digest is None and info.kind is ItemKind.PHOTO:
         digest = await asyncio.to_thread(_sha256, path)
+    if digest is not None:
         info = ProbeInfo(**{**info.__dict__, "sha256": digest})
     return info
 

@@ -32,6 +32,8 @@ YTDLP_REQUIRED_FLAGS: tuple[str, ...] = (
     "--no-part",
     "--no-progress",
     "--print-to-file",
+    "--load-info-json",
+    "--concurrent-fragments",
 )
 
 GALLERYDL_REQUIRED_FLAGS: tuple[str, ...] = (

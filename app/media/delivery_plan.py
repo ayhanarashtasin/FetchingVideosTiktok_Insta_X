@@ -13,14 +13,15 @@ Rules encoded here
 * Source order is the send order. The sequence is cut into contiguous runs of one family (photo/video
   vs document - Telegram forbids mixing them in one album), each run into batches of at most 10;
   a batch of one is sent individually (albums need 2-10 items).
-* Captions carry the EXACT submitted URL. Every batch's first item gets one; if the URL does not fit a
-  caption it is never truncated - a separate message carries it. Albums (and any multi-step plan) end
-  with a separate source-link message, which is also where the `Original files` button goes because a
-  media group cannot hold an inline keyboard.
+* Captions carry the submitted URL stripped of query parameters and fragments (`?` / `#`). Every batch's
+  first item gets one; if the URL does not fit a caption it is never truncated - a separate message carries
+  it. Albums with photos (and any multi-step plan) end with a separate source-link message, which is also
+  where the `Original files` button goes because a media group cannot hold an inline keyboard.
 """
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from enum import StrEnum
 
@@ -88,9 +89,32 @@ class DeliveryPlan:
     button_on_link: bool  # ...or on the final link message
 
 
-def caption_for(url: str) -> str | None:
-    text = f"Original link: {url}"
-    return text if len(text) <= CAPTION_LIMIT else None
+def display_url(url: str) -> str:
+    """Strip tracking query parameters and fragments (keep everything before `?` / `#`)."""
+    return url.split("?", 1)[0].split("#", 1)[0]
+
+
+def asset_resolution(asset: MediaAsset) -> str | None:
+    """Compact resolution tag like `720p` / `1080p` / `360p` (shortest side for portrait/landscape)."""
+    if asset.width and asset.height:
+        return f"{min(asset.width, asset.height)}p"
+    if asset.height:
+        return f"{asset.height}p"
+    return None
+
+
+def original_command_line(job_id: str) -> str:
+    return f"Original files: /orig_{job_id}"
+
+
+def caption_for(url: str, resolutions: Sequence[str] = ()) -> str | None:
+    clean = display_url(url)
+    unique = [r for r in dict.fromkeys(resolutions) if r]
+    if unique:
+        with_res = f"{clean}\n{'/'.join(unique)}"
+        if len(with_res) <= CAPTION_LIMIT:
+            return with_res
+    return clean if len(clean) <= CAPTION_LIMIT else None
 
 
 def photo_is_native(asset: MediaAsset, caps: Caps) -> tuple[bool, str | None]:
@@ -115,7 +139,7 @@ def decide(asset: MediaAsset, mode: DeliveryMode, caps: Caps) -> PlannedItem | R
             f"{asset.size_bytes} bytes exceeds the {caps.file_bytes}-byte upload limit",
         )  # fmt: skip
 
-    if mode is DeliveryMode.ORIGINAL:
+    if mode is DeliveryMode.ORIGINAL and asset.kind is ItemKind.PHOTO:
         return (
             PlannedItem(asset, SendAs.DOCUMENT, "original files requested")
             if asset.size_bytes <= caps.file_bytes
@@ -159,19 +183,43 @@ def chunk(items: list[PlannedItem]) -> list[list[PlannedItem]]:
     return [run[i : i + GROUP_MAX] for run in runs for i in range(0, len(run), GROUP_MAX)]
 
 
-def plan_delivery(assets: list[MediaAsset], *, mode: DeliveryMode, caps: Caps, url: str) -> DeliveryPlan:
+def plan_delivery(
+    assets: list[MediaAsset], *, mode: DeliveryMode, caps: Caps, url: str, job_id: str | None = None
+) -> DeliveryPlan:
     decisions = [decide(a, mode, caps) for a in sorted(assets, key=lambda a: a.position)]
     planned = [d for d in decisions if isinstance(d, PlannedItem)]
     rejected = tuple(d for d in decisions if isinstance(d, Rejected))
-    caption = caption_for(url)
-    steps = tuple(Step(items=tuple(batch), caption=caption) for batch in chunk(planned))
-
-    needs_link = bool(steps) and (len(steps) > 1 or any(s.is_group for s in steps) or caption is None)
-    button_allowed = mode is DeliveryMode.MEDIA  # an Original-files job already delivers originals
+    batches = chunk(planned)
+    steps = tuple(
+        Step(
+            items=tuple(batch),
+            caption=caption_for(url, [r for i in batch if (r := asset_resolution(i.asset))]),
+        )
+        for batch in batches
+    )
+    has_photo = any(i.asset.kind is ItemKind.PHOTO for i in planned)
+    button_allowed = mode is DeliveryMode.MEDIA and has_photo
+    # Single-batch albums cannot carry an inline keyboard in Telegram, so embed a 1-tap /orig_<id>
+    # command in the caption instead of sending a second message whenever it fits within CAPTION_LIMIT.
+    embedded_command = False
+    if len(steps) == 1 and steps[0].is_group and button_allowed and job_id is not None and steps[0].caption is not None:
+        with_cmd = f"{steps[0].caption}\n{original_command_line(job_id)}"
+        if len(with_cmd) <= CAPTION_LIMIT:
+            steps = (Step(items=steps[0].items, caption=with_cmd),)
+            embedded_command = True
+    all_res = list(dict.fromkeys(r for i in planned if (r := asset_resolution(i.asset))))
+    any_caption_missing = any(s.caption is None for s in steps)
+    needs_link = bool(steps) and (
+        len(steps) > 1
+        or any_caption_missing
+        or (any(s.is_group for s in steps) and button_allowed and not embedded_command)
+    )
+    clean = display_url(url)
+    link_text = f"{clean}\n{'/'.join(all_res)}" if all_res else clean
     return DeliveryPlan(
         steps=steps,
         rejected=rejected,
-        link_message=f"Original link: {url}" if needs_link else None,
-        button_on_media=bool(steps) and not needs_link and button_allowed,
+        link_message=link_text if needs_link else None,
+        button_on_media=bool(steps) and not needs_link and button_allowed and not embedded_command,
         button_on_link=needs_link and button_allowed,
     )

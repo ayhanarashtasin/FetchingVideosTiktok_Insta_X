@@ -7,15 +7,15 @@
 | Version | 1.0 |
 | Date | 2026-11-24 |
 | Status | Proposed implementation specification |
-| Product type | Private, self-hosted Telegram bot |
-| Audience | One owner initially; optional explicitly approved users |
+| Product type | Self-hosted Telegram bot |
+| Audience | Allowlisted users by default, with optional public access in private chats |
 | Related documents | [Architecture](architecture.md), [Implementation tasks](tasks.md) |
 
 ## 1. Product overview
 
-Build a private Telegram bot that receives a supported social media post URL, retrieves the highest-quality media available through permitted access, and returns actual photos or playable videos directly in Telegram with the original submitted URL below the media. The owner should not need a separate downloader website, a browser workflow, or manual file transfers.
+Build a Telegram bot that receives a supported social media post URL in a private chat, retrieves the highest-quality media available through permitted access, and returns actual photos or playable videos directly in Telegram with the original submitted URL below the media.
 
-The bot is for personal use with content the owner is authorized to download. It is not a public scraping service, an account monitoring tool, or a tool to obtain private or restricted content.
+The bot serves individual public posts that users are authorized to download.
 
 ## 2. Problem and goals
 
@@ -120,7 +120,7 @@ The `Original files` button is shown in Media mode for successful results within
 
 | ID | Priority | Requirement / acceptance condition |
 | --- | --- | --- |
-| FR-01 | Must | Restrict access to configured Telegram numeric user IDs in private chats. Reject others before any extraction or network fetch. |
+| FR-01 | Must | Serve human users in their own private chats. Require a configured numeric Telegram user ID by default. With `PUBLIC_ACCESS=true`, accept any Telegram user in their own private chat. Check access before starting extraction. |
 | FR-02 | Must | Accept one supported HTTP(S) item URL per message, including URLs embedded in text. Ask the user to send separately if multiple are present. |
 | FR-03 | Must | Resolve approved short-link redirects safely, detect the platform, and reject unsupported hosts, paths and unsafe destinations. |
 | FR-04 | Must | Implement every content type P01-P09 and return all available attached items in original order. Do not silently include thumbnails, profile photos, or unrelated posts. |
@@ -156,7 +156,7 @@ The official hosted Telegram Bot API documents 10 MB for multipart photo uploads
 
 ## 7. Security, rights and privacy
 
-- Permit only explicitly authorized Telegram users, private chats, and supported post URL patterns.
+- Accept supported post URL patterns in private chats. Check numeric Telegram user IDs in allowlist mode.
 - Use public content for which the owner has permission or a lawful basis to download. Respect platform terms, access restrictions, and reasonable request limits. Do not assume public visibility automatically permits copying.
 - If a normal authenticated session is necessary for a publicly shared Story, use only an owner-authorized session with permitted access. Never request passwords, cookies, or tokens through Telegram; do not implement credential harvesting or access-control bypass.
 - Keep bot tokens and session files out of Git, messages, logs and unencrypted backups. Restrict access to the service account.
@@ -177,7 +177,7 @@ These are proposed engineering targets, not guaranteed performance figures.
 | Concurrency | One active job per owner, two globally, bounded queue (default 10). |
 | Limits | 120-second extraction timeout, configurable upload timeout (default 600 seconds), max 30 attached items and 4 GB temporary budget per job; explicitly reject over-budget jobs. |
 | Reliability | No false full-success status, no cross-chat delivery, and no unbounded retries. |
-| Portability | Containerized deployment, Python service, no mandatory paid API key for extractors. |
+| Portability | Native cross-platform Python 3.12 service (Windows and Linux VPS with systemd), locked dependencies via uv, no mandatory paid API key for extractors. |
 | Maintainability | Separate platform adapters, tested extraction versions, structured errors and dependency updates. |
 
 ## 9. Error messages
@@ -216,7 +216,7 @@ These are proposed engineering targets, not guaranteed performance figures.
 
 ## 12. Implementation assumptions and risks
 
-- Initial owner is the only approved user; additional users must be explicitly configured.
+- Deployments use `ALLOWED_USER_IDS` by default. Set `PUBLIC_ACCESS=true` to open the bot to all Telegram users in private chats.
 - Media mode is the default; original-document delivery is available as an option. Watermarks are acceptable.
 - Platform extractors are volatile. TikTok photo mode and Instagram Stories are early feasibility risks, not features to postpone until the end.
 - A local Bot API service is recommended for the full-quality release if files exceed the hosted limits; document hosted mode as the simpler development profile.

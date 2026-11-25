@@ -2,8 +2,8 @@
 
     python -m app.extractors.service
 
-Deployed as its own container with NO Telegram token, NO database, a read-only root filesystem, a non-root
-identity and a network whose only exit is the allowlisting egress proxy. The bot (the trusted orchestrator)
+Designed to run as a separate unprivileged process (e.g. its own systemd unit) with NO Telegram token,
+NO database, and optional routing through the allowlisting egress proxy. The bot (the trusted orchestrator)
 calls it; nothing else can: every request needs the shared secret (constant-time comparison), and each call is
 validated again here because this is the component that talks to the internet:
 
@@ -18,6 +18,7 @@ import asyncio
 import hmac
 import json
 import logging
+import os
 import shutil
 from collections.abc import Awaitable, Callable
 from pathlib import Path
@@ -31,12 +32,20 @@ from app.core.deadline import Deadline
 from app.core.errors import BotError, ErrorCode
 from app.core.ports import ExtractionBackend
 from app.core.url_validator import UrlKind, parse_hosts_config, validate_url
+from app.extractors.session_file import COOKIES_NAME
 from app.extractors.wire import MAX_BODY_BYTES, SECRET_HEADER, url_from_wire, url_to_wire
+from app.extractors.ytdlp_runner import INFO_JSON_NAME
 from app.logging_setup import log_event, redact, setup_logging
-from app.services.cleanup import JOB_ID_RE
+from app.services.cleanup import JOB_ID_RE, share_with_group
 
 log = logging.getLogger("app.worker")
 MIN_BUDGET, MAX_BUDGET = 1.0, 900.0
+# Cancel the handler when the bot disconnects (user /cancel, shutdown, timeout): the cancellation reaches the
+# subprocess runner, which kills the whole tool tree. aiohttp does NOT do this by default.
+RUNNER_OPTIONS: dict[str, Any] = {"handler_cancellation": True}
+# Created by the worker, readable by nobody else even in the shared group.
+PRIVATE_NAMES = frozenset({COOKIES_NAME, INFO_JSON_NAME})
+WORKER_UMASK = 0o007  # group-writable, never world-accessible; children inherit it
 
 
 def _error(err: BotError) -> web.Response:
@@ -59,7 +68,7 @@ def create_app(
 
     @web.middleware
     async def authenticate(request: web.Request, handler: Callable[[web.Request], Awaitable[web.StreamResponse]]):
-        if request.path == "/v1/live":  # container liveness only; reveals nothing
+        if request.path == "/v1/live":  # process liveness only; reveals nothing
             return await handler(request)
         presented = request.headers.get(SECRET_HEADER, "").encode()
         if not hmac.compare_digest(presented, secret_bytes):  # constant time: no timing oracle on the secret
@@ -72,6 +81,10 @@ def create_app(
         if not JOB_ID_RE.fullmatch(ws.name) or ws.is_symlink() or ws.parent.resolve() != root or not ws.is_dir():
             raise BotError(ErrorCode.INVALID_URL, "workspace outside the job root", reason="bad_workspace")
         return ws
+
+    def hand_back(ws: Path) -> None:
+        """Whatever happened, leave the job directory removable/readable by the bot (same group)."""
+        share_with_group(ws, keep_private=PRIVATE_NAMES)
 
     def budget_of(body: dict[str, Any]) -> Deadline:
         try:
@@ -120,12 +133,20 @@ def create_app(
         return {"url": url_to_wire(out)}
 
     async def discover(body: dict[str, Any]) -> dict[str, Any]:
-        manifest = await backend.discover(checked_request(body), workspace_of(body), budget_of(body))
+        ws = workspace_of(body)
+        try:
+            manifest = await backend.discover(checked_request(body), ws, budget_of(body))
+        finally:
+            hand_back(ws)
         return {"manifest": manifest.model_dump(mode="json")}
 
     async def fetch(body: dict[str, Any]) -> dict[str, Any]:
         manifest = PostManifest.model_validate(body["manifest"])
-        result = await backend.fetch(checked_request(body), manifest, workspace_of(body), budget_of(body))
+        ws = workspace_of(body)
+        try:
+            result = await backend.fetch(checked_request(body), manifest, ws, budget_of(body))
+        finally:
+            hand_back(ws)
         return {"result": result.model_dump(mode="json")}
 
     async def live(_: web.Request) -> web.Response:
@@ -158,6 +179,8 @@ def create_app(
 def main() -> None:
     from app.extractors.local import LocalExtractionBackend
 
+    if hasattr(os, "umask"):
+        os.umask(WORKER_UMASK)  # before anything creates a file: tools inherit it
     settings = Settings()
     setup_logging(settings.log_level)
     secret = settings.resolved_worker_secret()
@@ -178,7 +201,9 @@ def main() -> None:
         await backend.aclose()
 
     app.on_cleanup.append(close_backend)
-    web.run_app(app, host=settings.worker_host, port=settings.worker_port, print=None, access_log=None)
+    web.run_app(
+        app, host=settings.worker_host, port=settings.worker_port, print=None, access_log=None, **RUNNER_OPTIONS
+    )
 
 
 if __name__ == "__main__":

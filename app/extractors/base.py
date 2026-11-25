@@ -8,6 +8,10 @@ be proven is reported as an omission or as unverified completeness - never silen
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
+import os
+import re
 from collections import OrderedDict
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
@@ -16,6 +20,7 @@ from typing import Any, Protocol
 
 from app.core.contracts import (
     ExtractionRequest,
+    FormatDescriptor,
     ItemDescriptor,
     ItemFailure,
     ItemKind,
@@ -25,12 +30,19 @@ from app.core.contracts import (
 )
 from app.core.deadline import Deadline
 from app.core.errors import BotError, ErrorCode
+from app.extractors.direct_download import (
+    DirectDownloadUnavailable,
+    DirectMediaDownloader,
+    DirectTarget,
+    FileTooLargeDirect,
+)
 from app.extractors.gallerydl_runner import GalleryDlRunner
-from app.extractors.ytdlp_runner import YtDlpRunner
+from app.extractors.ytdlp_runner import YtDlpRunner, YtFormatSource
 
 PHOTO_EXT = frozenset({"jpg", "jpeg", "png", "webp", "avif", "heic"})
 VIDEO_EXT = frozenset({"mp4", "m4v", "mov", "webm", "mkv"})
 AUDIO_EXT = frozenset({"mp3", "m4a", "aac", "opus", "ogg", "wav", "flac"})
+_SAFE_EXT = re.compile(r"^[A-Za-z0-9]{1,8}$")
 
 
 @dataclass
@@ -38,6 +50,8 @@ class ExtractionContext:
     ytdlp: YtDlpRunner
     gallerydl: GalleryDlRunner
     max_items: int = 30
+    downloader: DirectMediaDownloader | None = None
+    file_cap_bytes: int | None = None
 
 
 @dataclass
@@ -48,6 +62,7 @@ class FetchedItem:
     path: Path
     source_format: str | None = None
     processing: Processing = Processing.UNCHANGED
+    quality_note: str | None = None
 
 
 @dataclass
@@ -67,6 +82,10 @@ class Discovered:
     source: str  # "ytdlp" | "gallerydl"
     nums: dict[int, int] = field(default_factory=dict)  # position -> gallery-dl `num`
     schemes: dict[int, str] = field(default_factory=dict)  # position -> "ytdl" when gallery-dl merges via yt-dlp
+    urls: dict[int, tuple[str, str]] = field(default_factory=dict)  # position -> (direct CDN url, ext); worker-only
+    yt_info_json: Path | None = None
+    yt_sources: dict[str, YtFormatSource] = field(default_factory=dict)
+    yt_duration: float | None = None
     use_cookies: bool = False
     hint: str | None = None
 
@@ -121,6 +140,8 @@ class GdItem:
     width: int | None
     height: int | None
     scheme: str
+    url: str = ""
+    extension: str = ""
 
 
 def _positive_int(value: object) -> int | None:
@@ -163,6 +184,8 @@ def build_gd_items(
             width=_positive_int(meta.get("width")),
             height=_positive_int(meta.get("height")),
             scheme=str(meta.get("_scheme") or ""),
+            url=str(meta.get("_url") or ""),
+            extension=str(meta.get("extension") or "").lower(),
         )
     return [items[n] for n in sorted(items)]
 
@@ -182,6 +205,179 @@ def manifest_items(items: list[GdItem]) -> list[ItemDescriptor]:
     ]
 
 
+async def try_direct_gallerydl(
+    ctx: ExtractionContext,
+    found: Discovered,
+    workspace: Path,
+    deadline: Deadline,
+    *,
+    extra_headers: Mapping[str, str] | None = None,
+    max_file_bytes: int | None = None,
+) -> dict[int, Path] | None:
+    """Download already-discovered direct CDN URLs concurrently, skipping a 2nd gallery-dl scrape.
+
+    Returns `{num: local_path}` on full success, or `None` when any item requires gallery-dl
+    (e.g. `ytdl:` DASH/HLS stream, missing extension, or a CDN rejecting direct fetch).
+    `FileTooLargeDirect` propagates to the caller so single-video posts can switch to a smaller variant.
+    """
+    if ctx.downloader is None or not found.manifest.items:
+        return None
+    out_dir = workspace / "gd"
+    targets: list[DirectTarget] = []
+    headers = dict(extra_headers) if extra_headers else {}
+    for item in found.manifest.items:
+        num = found.nums.get(item.position)
+        if num is None or found.schemes.get(item.position) == "ytdl":
+            return None
+        url, ext = found.urls.get(item.position, ("", ""))
+        if not url or not _SAFE_EXT.fullmatch(ext):
+            return None
+        targets.append(DirectTarget(key=num, url=url, dest=out_dir / f"{num:03d}.{ext}", headers=headers))
+    try:
+        return await ctx.downloader.download_many(targets, workspace, deadline, max_file_bytes=max_file_bytes)
+    except DirectDownloadUnavailable:
+        return None
+
+
+async def fetch_ytdlp_video(
+    ctx: ExtractionContext,
+    url: str,
+    formats: list[FormatDescriptor],
+    sources: Mapping[str, YtFormatSource],
+    info_json: Path | None,
+    workspace: Path,
+    deadline: Deadline,
+    *,
+    duration: float | None = None,
+    forced_downgrade: bool = False,
+    prefix: str = "yt",
+    hint: str | None = None,
+    session_supported: bool = False,
+    use_cookies: bool = False,
+) -> tuple[Path, Any, str | None]:
+    """Fetch the highest source variant that fits under `ctx.file_cap_bytes` without re-encoding.
+
+    Tries direct parallel byte-range download for progressive URLs (checking Content-Length /
+    Content-Range before downloading), falling back to `yt-dlp --load-info-json`. When a lower
+    source variant had to be chosen, returns a human-readable `quality_note` for the caption.
+    """
+    from app.media.quality import (
+        estimated_choice_bytes,
+        exact_choice_bytes,
+        format_quality_note,
+        ranked_choices,
+    )
+
+    choices = ranked_choices(formats)
+    top = choices[0]
+    cap = ctx.file_cap_bytes
+    skipped_oversized = forced_downgrade
+    oversized_tiers: list[tuple[int, float]] = []  # (pixels, tbr) already proven > cap
+
+    def _pixels_of(c: Any) -> int:
+        v = c.video
+        return ((v.width or 0) * (v.height or 0) or (v.height or 0)) if v is not None else 0
+
+    for idx, choice in enumerate(choices):
+        has_smaller = idx < len(choices) - 1
+        px = _pixels_of(choice)
+        tbr = (choice.video.tbr or 0.0) if choice.video is not None else 0.0
+        if cap is not None and has_smaller and any(px >= fp and tbr >= ft * 0.95 for fp, ft in oversized_tiers):
+            skipped_oversized = True
+            continue
+        src = sources.get(choice.video.format_id) if (not choice.merge and choice.video is not None) else None
+        can_direct = (
+            ctx.downloader is not None
+            and src is not None
+            and (src.protocol or "https").lower() in {"https", "http"}
+            and bool(src.ext)
+            and bool(_SAFE_EXT.fullmatch(src.ext or ""))
+        )
+
+        if cap is not None:
+            exact = exact_choice_bytes(choice)
+            if exact is not None and exact > cap:
+                skipped_oversized = True
+                if px > 0:
+                    oversized_tiers.append((px, tbr))
+                continue
+            # For merged / HLS / DASH streams we cannot inspect a single Content-Length header first,
+            # so skip clearly oversized variants by bitrate*duration (keep the smallest as last resort).
+            if not can_direct and has_smaller:
+                est = estimated_choice_bytes(choice, duration)
+                if est is not None and est > cap:
+                    skipped_oversized = True
+                    continue
+
+        path: Path | None = None
+        if can_direct:
+            assert ctx.downloader is not None and src is not None and src.ext is not None
+            dest = workspace / f"{prefix}_1_direct.{src.ext.lower()}"
+            try:
+                downloaded = await ctx.downloader.download_many(
+                    [DirectTarget(key=1, url=src.url, dest=dest, headers=src.headers)],
+                    workspace,
+                    deadline,
+                    max_file_bytes=cap,
+                )
+                path = downloaded[1]
+            except FileTooLargeDirect:
+                skipped_oversized = True
+                if px > 0:
+                    oversized_tiers.append((px, tbr))
+                continue
+            except DirectDownloadUnavailable:
+                path = None
+
+        if path is None:
+            try:
+                paths = await ctx.ytdlp.download(
+                    url,
+                    workspace,
+                    deadline,
+                    selector=choice.selector,
+                    info_json=info_json,
+                    max_file_bytes=cap if has_smaller else None,
+                    hint=hint,
+                    session_supported=session_supported,
+                    use_cookies=use_cookies,
+                    prefix=prefix,
+                )
+                path = paths[0]
+            except BotError as err:
+                if cap is not None and err.code is ErrorCode.LIMIT_EXCEEDED and err.reason == "filesize":
+                    skipped_oversized = True
+                    if px > 0:
+                        oversized_tiers.append((px, tbr))
+                    continue
+                raise
+
+        if cap is not None:
+            actual_size = await asyncio.to_thread(os.path.getsize, path)
+            if actual_size > cap:
+                skipped_oversized = True
+                if px > 0:
+                    oversized_tiers.append((px, tbr))
+                if has_smaller:
+                    with contextlib.suppress(OSError):
+                        await asyncio.to_thread(path.unlink, missing_ok=True)
+                    continue
+                with contextlib.suppress(OSError):
+                    await asyncio.to_thread(path.unlink, missing_ok=True)
+                raise BotError(ErrorCode.FILE_TOO_LARGE, "all source video variants exceed upload limit")
+
+        note = (
+            format_quality_note(choice, None if (forced_downgrade and idx == 0) else top, cap)
+            if (cap is not None and (idx > 0 or forced_downgrade))
+            else None
+        )
+        return path, choice, note
+
+    if skipped_oversized and cap is not None:
+        raise BotError(ErrorCode.FILE_TOO_LARGE, "all source video variants exceed upload limit")
+    raise BotError(ErrorCode.EXTRACTOR_CHANGED, "no playable video format could be downloaded")
+
+
 async def ytdlp_single_video(
     ctx: ExtractionContext,
     url: str,
@@ -192,36 +388,43 @@ async def ytdlp_single_video(
     hint: str,
     session_supported: bool,
     use_cookies: bool = False,
-) -> tuple[Path, str | None, Processing]:
+    forced_downgrade: bool = False,
+) -> tuple[Path, str | None, Processing, str | None]:
     """Targeted yt-dlp fallback for a post whose ONLY item is one video.
 
     Reconciliation is trivial and therefore safe (one entry <-> one item): the entry must carry the
     requested post id. Multi-item posts never use this path - matching yt-dlp's entries to
     gallery-dl's items by guesswork could deliver the wrong media.
     """
-    # Local import: media.quality does not depend on extractors, keep it that way.
-    from app.media.quality import select_format
-
     info = await ctx.ytdlp.discover(
         url, workspace, deadline, hint=hint, session_supported=session_supported, use_cookies=use_cookies
     )
-    if len(info.entries) != 1 or not id_matches(info.entries[0].id):
+    if len(info.entries) != 1:
         raise BotError(ErrorCode.EXTRACTOR_CHANGED, "fallback did not return exactly the requested post")
-    choice = select_format(info.entries[0].formats)
-    paths = await ctx.ytdlp.download(
+    entry = info.entries[0]
+    matched = id_matches(entry.id) or (bool(entry.display_id) and id_matches(entry.display_id))
+    if not matched:
+        raise BotError(ErrorCode.EXTRACTOR_CHANGED, "fallback did not return exactly the requested post")
+    path, choice, note = await fetch_ytdlp_video(
+        ctx,
         url,
+        entry.formats,
+        entry.sources,
+        info.info_json,
         workspace,
         deadline,
-        selector=choice.selector,
+        duration=entry.duration,
+        forced_downgrade=forced_downgrade,
+        prefix="fb",
         hint=hint,
         session_supported=session_supported,
         use_cookies=use_cookies,
-        prefix="fb",
     )
     return (
-        paths[0],
+        path,
         choice.video.format_id if choice.video else None,
         Processing.MERGED if choice.merge else Processing.UNCHANGED,
+        note,
     )
 
 
@@ -240,11 +443,12 @@ async def fetch_via_gallerydl(
     hint: str,
     session_supported: bool,
     ytdlp_id_matches: Callable[[str], bool] | None,
+    direct_headers: Mapping[str, str] | None = None,
 ) -> FetchOutcome:
     """Download a gallery-dl-discovered post and map the files back to manifest items by identity.
 
-    If (and only if) the post's SOLE item is a video that gallery-dl could not deliver - either by
-    failing outright or by returning nothing for it - one yt-dlp attempt is made, accepted only when it
+    If (and only if) the post's SOLE item is a video that gallery-dl could not deliver - or whose
+    top variant exceeds `ctx.file_cap_bytes` - one yt-dlp attempt is made, accepted only when it
     returns exactly the requested post (`ytdlp_id_matches`). Access/auth/rate/challenge errors never
     trigger it. Pass `ytdlp_id_matches=None` to disable the fallback (e.g. Stories).
     """
@@ -255,33 +459,114 @@ async def fetch_via_gallerydl(
     items: list[FetchedItem] = []
     omissions: list[ItemFailure] = []
     skipped_warning = False
+    oversized_single = False
+
+    direct_files: dict[int, Path] | None = None
     try:
-        res = await ctx.gallerydl.download(
-            url,
+        direct_files = await try_direct_gallerydl(
+            ctx,
+            found,
             workspace,
             deadline,
-            options=options,
-            use_cookies=use_cookies,
-            hint=hint,
-            session_supported=session_supported,
+            extra_headers=direct_headers,
+            max_file_bytes=ctx.file_cap_bytes if fallback_possible else None,
         )
-        items, omissions = map_downloads(found, res.files)
-        skipped_warning = res.warnings.skipped_media
-    except BotError as err:
-        if not (fallback_possible and err.fallback_allowed and err.code in _FALLBACK_CODES):
-            raise
-        assert only is not None
-        omissions = [
-            ItemFailure(
-                position=only.position,
-                source_item_id=only.source_item_id,
-                code=err.code,
-                message="gallery-dl could not deliver the video",
+    except FileTooLargeDirect:
+        oversized_single = True
+
+    if oversized_single and fallback_possible and only is not None and ytdlp_id_matches is not None:
+        try:
+            path, fmt, processing, note = await ytdlp_single_video(
+                ctx,
+                url,
+                workspace,
+                deadline,
+                id_matches=ytdlp_id_matches,
+                hint=hint,
+                session_supported=session_supported,
+                use_cookies=use_cookies,
+                forced_downgrade=True,
             )
-        ]
+            items = [FetchedItem(only.source_item_id, only.position, ItemKind.VIDEO, path, fmt, processing, note)]
+            omissions = []
+            return FetchOutcome(
+                items=items,
+                omissions=omissions,
+                expected_count=manifest.expected_count,
+                count_verified=manifest.count_verified,
+                skipped_media_warning=manifest.skipped_media_warning,
+            )
+        except BotError as err:
+            if not err.fallback_allowed or err.code is ErrorCode.FILE_TOO_LARGE:
+                raise
+            raise BotError(ErrorCode.FILE_TOO_LARGE, "source video exceeds upload limit") from None
+
+    if direct_files is not None:
+        items, omissions = map_downloads(found, direct_files)
+    else:
+        try:
+            res = await ctx.gallerydl.download(
+                url,
+                workspace,
+                deadline,
+                options=options,
+                use_cookies=use_cookies,
+                hint=hint,
+                session_supported=session_supported,
+            )
+            items, omissions = map_downloads(found, res.files)
+            skipped_warning = res.warnings.skipped_media
+        except BotError as err:
+            if not (fallback_possible and err.fallback_allowed and err.code in _FALLBACK_CODES):
+                raise
+            assert only is not None
+            omissions = [
+                ItemFailure(
+                    position=only.position,
+                    source_item_id=only.source_item_id,
+                    code=err.code,
+                    message="gallery-dl could not deliver the video",
+                )
+            ]
+
+    if (
+        fallback_possible
+        and ctx.file_cap_bytes is not None
+        and len(items) == 1
+        and not omissions
+        and only is not None
+        and ytdlp_id_matches is not None
+    ):
+        size = await asyncio.to_thread(os.path.getsize, items[0].path)
+        if size > ctx.file_cap_bytes:
+            oversized_path = items[0].path
+            try:
+                path, fmt, processing, note = await ytdlp_single_video(
+                    ctx,
+                    url,
+                    workspace,
+                    deadline,
+                    id_matches=ytdlp_id_matches,
+                    hint=hint,
+                    session_supported=session_supported,
+                    use_cookies=use_cookies,
+                    forced_downgrade=True,
+                )
+                with contextlib.suppress(OSError):
+                    await asyncio.to_thread(oversized_path.unlink, missing_ok=True)
+                items = [FetchedItem(only.source_item_id, only.position, ItemKind.VIDEO, path, fmt, processing, note)]
+            except BotError as err:
+                if not err.fallback_allowed:
+                    raise
+                # Keep original oversized item so delivery_plan reports FILE_TOO_LARGE cleanly.
+                if err.code is ErrorCode.FILE_TOO_LARGE:
+                    with contextlib.suppress(OSError):
+                        await asyncio.to_thread(oversized_path.unlink, missing_ok=True)
+                    raise
+
     if omissions and fallback_possible and only is not None and ytdlp_id_matches is not None:
         try:
-            path, fmt, processing = await ytdlp_single_video(
+            path, fmt, processing, note = await ytdlp_single_video(
                 ctx,
                 url,
                 workspace,
@@ -291,7 +576,7 @@ async def fetch_via_gallerydl(
                 session_supported=session_supported,
                 use_cookies=use_cookies,
             )
-            items = [FetchedItem(only.source_item_id, only.position, ItemKind.VIDEO, path, fmt, processing)]
+            items = [FetchedItem(only.source_item_id, only.position, ItemKind.VIDEO, path, fmt, processing, note)]
             omissions = []
         except BotError as err:
             if not err.fallback_allowed:
