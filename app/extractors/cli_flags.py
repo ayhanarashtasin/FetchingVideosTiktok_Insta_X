@@ -23,6 +23,7 @@ YTDLP_REQUIRED_FLAGS: tuple[str, ...] = (
     "--playlist-items",
     "--max-filesize",
     "--dump-single-json",
+    "--no-check-formats",
     "--format",
     "--merge-output-format",
     "--paths",

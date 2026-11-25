@@ -19,7 +19,7 @@ Keep extraction libraries behind adapters so a platform-specific failure can be 
 | Video extraction | yt-dlp | Video format enumeration/download across target platforms |
 | Photo / multi-item extraction | gallery-dl | Candidate extractor for image posts, albums and public Stories |
 | Media inspection | FFprobe | Validate type, duration, streams, dimensions and codecs |
-| Media processing | FFmpeg | Lossless stream merge/remux where possible |
+| Media processing | FFmpeg | Lossless stream merge/remux first; auto-transcode fallback to H.264/AAC MP4 in Media mode |
 | Network | httpx or aiohttp | Controlled redirect validation and adapter HTTP, with timeouts |
 | Settings/contracts | Pydantic / pydantic-settings | Validated configuration and internal data contracts |
 | Metadata | SQLite (WAL, restricted local `data/` directory) | Small job state, owner preferences, retries and callback mapping |
@@ -249,7 +249,7 @@ MediaAsset
   audio_codec: str | null
   sha256: str | null
   source_format: str | null
-  processing: unchanged | merged | remuxed
+  processing: unchanged | merged | remuxed | transcoded
 
 ExtractionResult
   assets: ordered list[MediaAsset]
@@ -282,7 +282,7 @@ Default native production runs single-process (`WORKER_MODE=inprocess`) under a 
 
 1. Select the highest available source representation per media item, preferring source resolution/quality metadata, then bitrate where comparable. Use actual video streams, not thumbnails or preview clips. For photos prefer the highest-resolution/full-size representation available through the permitted interface.
 2. For split video/audio streams, select high-quality compatible tracks and use FFmpeg stream copy to merge. Verify with FFprobe that an audio track is retained if present at source. Preserve rotation/aspect ratio, frame rate and source streams where possible.
-3. For Media mode, if the source is already Telegram-playable, send unchanged. If only container is incompatible, try lossless remux; if still incompatible, send the source as a document with an explanation. No automatic lossy transcode in v1.
+3. For Media mode, if the source is already Telegram-playable, send unchanged. If only container is incompatible, try lossless remux first; if the video is still non-native (e.g. HEVC when `NATIVE_HEVC=false`, 10-bit, VP9, AV1, Opus), fall back to transcoding via FFmpeg to H.264 (`yuv420p`) + AAC `.mp4` (`+faststart`) for inline playback, keeping Original-mode untouched and falling back to a document if transcoding fails.
 4. For Original files mode, send the downloaded photo file unchanged; send the downloaded/merged video without re-encoding. Preserve existing watermarks and metadata as available. Do not remove watermarks or generate clean variants through manipulation.
 5. Validate each file's actual size, type, dimensions, duration and streams. Enforce cumulative bytes during extraction to avoid exhausting disk. Keep enough free disk for temporary merge outputs.
 

@@ -47,6 +47,10 @@ class DirectDownloadUnavailable(Exception):
     """Direct CDN fetch did not succeed; caller should fall back to the extractor tool."""
 
 
+class DirectFormatMissing(DirectDownloadUnavailable):
+    """CDN returned 404/410 for this specific format URL; try another variant instead of retrying."""
+
+
 class FileTooLargeDirect(Exception):
     """Server declared or streamed a file larger than the per-file upload cap."""
 
@@ -121,7 +125,8 @@ class DirectMediaDownloader:
         dns: Resolver | None = None,
         max_bytes: int = 4_000_000_000,
         min_free_bytes: int = 0,
-        request_timeout: float = 30.0,
+        request_timeout: float = 20.0,
+        connect_timeout: float = 10.0,
         allow_http: bool = False,
         connector_factory: Callable[[], aiohttp.BaseConnector] | None = None,
     ) -> None:
@@ -130,6 +135,7 @@ class DirectMediaDownloader:
         self._max_bytes = max_bytes
         self._min_free = min_free_bytes
         self._request_timeout = request_timeout
+        self._connect_timeout = connect_timeout
         self._allow_http = allow_http
         self._connector_factory = connector_factory
         self._session: aiohttp.ClientSession | None = None
@@ -267,7 +273,7 @@ class DirectMediaDownloader:
             seen.add(current)
             timeout = aiohttp.ClientTimeout(
                 total=deadline.remaining(),
-                sock_connect=min(self._request_timeout, deadline.remaining()),
+                sock_connect=min(self._connect_timeout, deadline.remaining()),
                 sock_read=min(self._request_timeout, deadline.remaining()),
             )
             try:
@@ -324,6 +330,8 @@ class DirectMediaDownloader:
                     )
                 elif resp.status == 200:
                     await self._stream_full(resp, part, budget, deadline, max_file_bytes=max_file_bytes)
+                elif resp.status in {404, 410}:
+                    raise DirectFormatMissing(f"http {resp.status}")
                 else:
                     raise DirectDownloadUnavailable(f"http {resp.status}")
             finally:
@@ -468,7 +476,7 @@ class DirectMediaDownloader:
         session = self._get_session()
         timeout = aiohttp.ClientTimeout(
             total=deadline.remaining(),
-            sock_connect=min(self._request_timeout, deadline.remaining()),
+            sock_connect=min(self._connect_timeout, deadline.remaining()),
             sock_read=min(self._request_timeout, deadline.remaining()),
         )
         try:

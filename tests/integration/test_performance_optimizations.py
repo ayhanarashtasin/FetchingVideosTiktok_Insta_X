@@ -733,3 +733,284 @@ def test_caption_with_resolution_preserves_exact_url_even_near_limit():
     long_url = "https://x.com/u/status/" + "1" * (CAPTION_LIMIT - len("https://x.com/u/status/") - 2)
     assert len(long_url) <= CAPTION_LIMIT
     assert caption_for(long_url, ["720p"]) == long_url
+
+
+@requires_ffmpeg
+async def test_tiktok_split_hevc_merges_and_transcodes_in_single_ffmpeg_pass(tmp_path, media, make_settings):
+    import subprocess
+    from pathlib import Path
+
+    from app.core.contracts import DeliveryMode, Processing
+    from app.media.quality import is_native_video
+    from tests.conftest import FFMPEG
+
+    hevc_vonly = tmp_path / "hevc_vonly.mp4"
+    subprocess.run(
+        [
+            FFMPEG,
+            "-nostdin",
+            "-v",
+            "error",
+            "-y",
+            "-i",
+            str(media.mp4_hevc_aac),
+            "-c:v",
+            "copy",
+            "-an",
+            str(hevc_vonly),
+        ],
+        check=True,
+    )
+    srv = await _MediaBenchServer(
+        {"/v_hevc.mp4": hevc_vonly.read_bytes(), "/a.m4a": media.audio_only_m4a.read_bytes()},
+        support_range=True,
+        delay=0.05,
+    ).start()
+    tt_url = "https://www.tiktok.com/@someuser/video/7300000000000000000"
+    fake = FakeToolRunner()
+    fake.yt_info(
+        tt_url,
+        {
+            "id": "7300000000000000000",
+            "duration": 1.0,
+            "extractor_key": "TikTok",
+            "formats": [
+                {
+                    "format_id": "bytevc1_1080p_v",
+                    "vcodec": "hevc",
+                    "acodec": "none",
+                    "ext": "mp4",
+                    "width": 1080,
+                    "height": 1920,
+                    "tbr": 2000.0,
+                    "protocol": "http",
+                    "url": f"{srv.base_url}/v_hevc.mp4",
+                },
+                {
+                    "format_id": "audio_aac",
+                    "vcodec": "none",
+                    "acodec": "mp4a.40.2",
+                    "ext": "m4a",
+                    "tbr": 128.0,
+                    "protocol": "http",
+                    "url": f"{srv.base_url}/a.m4a",
+                },
+            ],
+        },
+    )
+
+    dl = _loopback_downloader()
+    backend = LocalExtractionBackend(make_settings(), runner=fake, downloader=dl)
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    try:
+        v = validate_url(tt_url)
+        req = ExtractionRequest(
+            job_id=uuid.uuid4(),
+            owner_id=1,
+            chat_id=1,
+            origin_message_id=1,
+            original_url=tt_url,
+            extraction_url=v.extraction_url,
+            platform=v.platform,
+            post_hint=v.post_hint,
+            delivery_mode=DeliveryMode.MEDIA,
+        )
+        manifest = await backend.discover(req, ws, Deadline(30))
+        result = await backend.fetch(req, manifest, ws, Deadline(30))
+
+        (asset,) = result.assets
+        assert asset.processing is Processing.TRANSCODED
+        assert (asset.container, asset.video_codec, asset.audio_codec, asset.pix_fmt) == (
+            "mp4",
+            "h264",
+            "aac",
+            "yuv420p",
+        )
+        assert is_native_video(
+            container=asset.container,
+            video_codec=asset.video_codec,
+            audio_codec=asset.audio_codec,
+            pix_fmt=asset.pix_fmt,
+        )
+        assert srv.max_in_flight >= 2, "video and audio split tracks must download concurrently"
+        yt_calls = fake.calls_to("yt_dlp")
+        assert len(yt_calls) == 1 and "-J" in yt_calls[0] and "--no-check-formats" in yt_calls[0]
+        ffmpeg_calls = [c for c in fake.calls if c and Path(c[0]).stem.lower() == "ffmpeg"]
+        assert len(ffmpeg_calls) == 1, "split HEVC must merge+transcode in ONE ffmpeg pass, not two"
+        assert not (ws / "yt_1_v.mp4").exists() and not (ws / "yt_1_a.m4a").exists()
+    finally:
+        await backend.aclose()
+        await srv.stop()
+
+
+@requires_ffmpeg
+async def test_split_direct_merge_stream_copies_native_media_and_preserves_original_mode(
+    tmp_path, media, make_settings
+):
+    import subprocess
+    from pathlib import Path
+
+    from app.core.contracts import DeliveryMode, Processing
+    from tests.conftest import FFMPEG, stream_hash
+
+    hevc_vonly = tmp_path / "hevc_vonly.mp4"
+    subprocess.run(
+        [
+            FFMPEG,
+            "-nostdin",
+            "-v",
+            "error",
+            "-y",
+            "-i",
+            str(media.mp4_hevc_aac),
+            "-c:v",
+            "copy",
+            "-an",
+            str(hevc_vonly),
+        ],
+        check=True,
+    )
+    srv = await _MediaBenchServer(
+        {
+            "/v_h264.mp4": media.video_only_mp4.read_bytes(),
+            "/v_hevc.mp4": hevc_vonly.read_bytes(),
+            "/a.m4a": media.audio_only_m4a.read_bytes(),
+        },
+        support_range=True,
+    ).start()
+    tt_url = "https://www.tiktok.com/@someuser/video/7300000000000000000"
+
+    def _make_payload(v_path: str, vcodec: str) -> dict:
+        return {
+            "id": "7300000000000000000",
+            "duration": 1.0,
+            "extractor_key": "TikTok",
+            "formats": [
+                {
+                    "format_id": "v_top",
+                    "vcodec": vcodec,
+                    "acodec": "none",
+                    "ext": "mp4",
+                    "width": 160,
+                    "height": 120,
+                    "tbr": 1000.0,
+                    "protocol": "http",
+                    "url": f"{srv.base_url}{v_path}",
+                },
+                {
+                    "format_id": "a_top",
+                    "vcodec": "none",
+                    "acodec": "aac",
+                    "ext": "m4a",
+                    "tbr": 128.0,
+                    "protocol": "http",
+                    "url": f"{srv.base_url}/a.m4a",
+                },
+            ],
+        }
+
+    try:
+        # 1. Native H.264 + AAC in MEDIA mode -> lossless stream-copy merge in ONE ffmpeg pass.
+        fake1 = FakeToolRunner()
+        fake1.yt_info(tt_url, _make_payload("/v_h264.mp4", "h264"))
+        backend1 = LocalExtractionBackend(make_settings(), runner=fake1, downloader=_loopback_downloader())
+        ws1 = tmp_path / "ws1"
+        ws1.mkdir()
+        try:
+            v = validate_url(tt_url)
+            req = ExtractionRequest(
+                job_id=uuid.uuid4(),
+                owner_id=1,
+                chat_id=1,
+                origin_message_id=1,
+                original_url=tt_url,
+                extraction_url=v.extraction_url,
+                platform=v.platform,
+                post_hint=v.post_hint,
+                delivery_mode=DeliveryMode.MEDIA,
+            )
+            m1 = await backend1.discover(req, ws1, Deadline(30))
+            r1 = await backend1.fetch(req, m1, ws1, Deadline(30))
+            (a1,) = r1.assets
+            assert a1.processing is Processing.MERGED and a1.video_codec == "h264" and a1.audio_codec == "aac"
+            assert stream_hash(a1.local_path, "0:v:0") == stream_hash(media.video_only_mp4, "0:v:0")
+            assert len([c for c in fake1.calls if c and Path(c[0]).stem.lower() == "ffmpeg"]) == 1
+        finally:
+            await backend1.aclose()
+
+        # 2. HEVC + AAC in ORIGINAL mode -> stream-copy merge only, never transcodes HEVC.
+        fake2 = FakeToolRunner()
+        fake2.yt_info(tt_url, _make_payload("/v_hevc.mp4", "hevc"))
+        backend2 = LocalExtractionBackend(make_settings(), runner=fake2, downloader=_loopback_downloader())
+        ws2 = tmp_path / "ws2"
+        ws2.mkdir()
+        try:
+            v = validate_url(tt_url)
+            req2 = ExtractionRequest(
+                job_id=uuid.uuid4(),
+                owner_id=1,
+                chat_id=1,
+                origin_message_id=1,
+                original_url=tt_url,
+                extraction_url=v.extraction_url,
+                platform=v.platform,
+                post_hint=v.post_hint,
+                delivery_mode=DeliveryMode.ORIGINAL,
+            )
+            m2 = await backend2.discover(req2, ws2, Deadline(30))
+            r2 = await backend2.fetch(req2, m2, ws2, Deadline(30))
+            (a2,) = r2.assets
+            assert a2.processing is Processing.MERGED and a2.video_codec == "hevc" and a2.audio_codec == "aac"
+            assert stream_hash(a2.local_path, "0:v:0") == stream_hash(hevc_vonly, "0:v:0")
+            assert len([c for c in fake2.calls if c and Path(c[0]).stem.lower() == "ffmpeg"]) == 1
+        finally:
+            await backend2.aclose()
+    finally:
+        await srv.stop()
+
+
+@requires_ffmpeg
+async def test_direct_404_format_advances_immediately_without_ytdlp_retry_or_size_note(tmp_path, media, make_settings):
+    small_video = media.mp4_h264_aac.read_bytes()
+    srv = await _MediaBenchServer({"/fallback_540p.mp4": small_video}, support_range=True).start()
+    srv.status_paths["/missing_720p.mp4"] = 404
+
+    tt_url = "https://www.tiktok.com/@someuser/video/7300000000000000000"
+    fake = FakeToolRunner()
+    payload = fixture("ytdlp_tiktok_video")
+    for fmt in payload["formats"]:
+        fmt["protocol"] = "http"
+        if fmt["format_id"] == "bytevc1_720p_1":
+            fmt["url"] = f"{srv.base_url}/missing_720p.mp4"
+        else:
+            fmt["url"] = f"{srv.base_url}/fallback_540p.mp4"
+    fake.yt_info(tt_url, payload)
+
+    backend = LocalExtractionBackend(make_settings(), runner=fake, downloader=_loopback_downloader())
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    try:
+        v = validate_url(tt_url)
+        req = ExtractionRequest(
+            job_id=uuid.uuid4(),
+            owner_id=1,
+            chat_id=1,
+            origin_message_id=1,
+            original_url=tt_url,
+            extraction_url=v.extraction_url,
+            platform=v.platform,
+            post_hint=v.post_hint,
+        )
+        manifest = await backend.discover(req, ws, Deadline(30))
+        result = await backend.fetch(req, manifest, ws, Deadline(30))
+        (asset,) = result.assets
+        assert asset.source_format == "h264_540p_1"
+        assert asset.local_path.read_bytes() == small_video
+        assert asset.quality_note is None, "404 fallback is not a file-size downgrade"
+        assert [c for c in fake.calls_to("yt_dlp") if "-f" in c] == [], (
+            "must skip straight to next format on 404 instead of spawning a 2nd yt-dlp subprocess"
+        )
+    finally:
+        await backend.aclose()
+        await srv.stop()

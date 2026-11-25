@@ -82,10 +82,21 @@ class FakeToolRunner:
             return self._gallery_dl(argv, url)
         if "yt_dlp" in argv:
             return self._yt_dlp(argv, url)
-        if argv and "ffprobe" in argv[0].lower():  # real probing of the real synthetic media
+        if argv and Path(argv[0]).stem.lower() in {"ffprobe", "ffmpeg"}:
+            # Real probing and remux/transcode of the real synthetic media
             from app.services.subprocess_runner import SubprocessRunner
 
-            return await SubprocessRunner().run(args, cwd=cwd, env=env, timeout=timeout, max_stdout=max_stdout)
+            return await SubprocessRunner().run(
+                args,
+                cwd=cwd,
+                env=env,
+                timeout=timeout,
+                max_stdout=max_stdout,
+                max_stderr=max_stderr,
+                watch_dir=watch_dir,
+                max_dir_bytes=max_dir_bytes,
+                min_free_bytes=min_free_bytes,
+            )
         return ProcessResult(returncode=1, stdout=b"", stderr=b"fake runner: unexpected command")
 
     def _gallery_dl(self, argv: list[str], url: str) -> ProcessResult:

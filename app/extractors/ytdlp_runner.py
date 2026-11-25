@@ -106,7 +106,7 @@ def _source(raw: dict, fallback_headers: dict[str, str]) -> YtFormatSource | Non
                 headers[k] = v
     cookies = raw.get("cookies")
     if isinstance(cookies, str) and cookies.strip():
-        headers.setdefault("Cookie", cookies.strip())
+        headers["Cookie"] = cookies.strip()
     proto = raw.get("protocol")
     ext = raw.get("ext")
     return YtFormatSource(
@@ -245,6 +245,7 @@ class YtDlpRunner:
             *self._base(cookies=self._session(workspace, use_cookies)),
             "--playlist-items",
             f"1:{self._max_items}",
+            "--no-check-formats",
             "-J",
             "--",
             url,

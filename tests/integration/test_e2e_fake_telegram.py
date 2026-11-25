@@ -365,3 +365,34 @@ async def test_the_healthcheck_fails_when_the_heartbeat_is_missing(tmp_path):
         [sys.executable, "-m", "app.healthcheck"], cwd=REPO, env=env, capture_output=True, text=True, timeout=60
     )
     assert proc.returncode == 1 and "no heartbeat" in proc.stderr
+
+
+async def test_tiktok_and_instagram_non_native_videos_transcode_and_send_inline(tmp_path, media):
+    ig_reel = "https://www.instagram.com/reel/ABCdef12345/"
+    e = await start_e2e(tmp_path)
+    try:
+        e.tools.yt_info(TT_VIDEO, "ytdlp_tiktok_video")
+        e.tools.yt_file(TT_VIDEO, media.mp4_hevc_aac)
+        e.tools.yt_info(ig_reel, "ytdlp_instagram_reel")
+        e.tools.yt_file(ig_reel, media.webm_vp9_opus)
+
+        await e.say(f"{TT_VIDEO}?is_from_webapp=1", message_id=11)
+        await e.idle()
+        await e.say(f"{ig_reel}?igsh=tracking", message_id=12)
+        await e.server.wait_for(lambda: len(e.jobs()) >= 2)
+        await e.idle()
+
+        videos = e.server.calls_of("sendVideo")
+        assert len(videos) == 2
+        assert e.server.calls_of("sendDocument") == []
+        assert videos[0].fields["caption"] == f"{TT_VIDEO}\n120p"
+        assert videos[1].fields["caption"] == f"{ig_reel}\n120p"
+        for call in videos:
+            assert (call.fields["width"], call.fields["height"], call.fields["supports_streaming"]) == (
+                "160",
+                "120",
+                "true",
+            )
+            assert "reply_markup" not in call.fields
+    finally:
+        await e.stop()

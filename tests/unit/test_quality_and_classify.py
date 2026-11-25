@@ -105,6 +105,37 @@ def test_nothing_playable_is_an_error():
         select_format([])
 
 
+def test_unplayable_bytevc2_formats_are_filtered_out():
+    vvc_1080 = FormatDescriptor(
+        format_id="bytevc2_1080p",
+        has_video=True,
+        has_audio=True,
+        width=1080,
+        height=1920,
+        vcodec="bytevc2",
+        acodec="aac",
+        tbr=2500.0,
+        ext="mp4",
+        note="(UNPLAYABLE)",
+    )
+    hevc_720 = fmt("bytevc1_720p", w=720, h=1280, vc="h265", tbr=1500.0)
+    h264_540 = fmt("h264_540p", w=576, h=1024, vc="h264", tbr=900.0)
+    assert select_format([vvc_1080, hevc_720, h264_540]).selector == "bytevc1_720p"
+
+    flagged_only = FormatDescriptor(
+        format_id="weird_1080",
+        has_video=True,
+        has_audio=True,
+        width=1080,
+        height=1920,
+        vcodec="h264",
+        note="UNPLAYABLE",
+    )
+    with pytest.raises(BotError) as exc:
+        select_format([vvc_1080, flagged_only])
+    assert exc.value.code is ErrorCode.EXTRACTOR_CHANGED and exc.value.reason == "no_video"
+
+
 # --- native playback policy ------------------------------------------------------------------------------
 def test_native_video_policy():
     ok = dict(container="mp4", video_codec="h264", audio_codec="aac", pix_fmt="yuv420p")

@@ -50,6 +50,7 @@ class Processing(StrEnum):
     UNCHANGED = "unchanged"
     MERGED = "merged"
     REMUXED = "remuxed"
+    TRANSCODED = "transcoded"
 
 
 class Completeness(StrEnum):

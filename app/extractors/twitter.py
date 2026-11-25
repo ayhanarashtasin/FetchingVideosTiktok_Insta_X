@@ -135,5 +135,6 @@ class TwitterAdapter:
             use_cookies=False,
             hint="tweet",
             session_supported=False,
+            mode=request.delivery_mode,
             ytdlp_id_matches=lambda i: i == tweet_id or i.startswith(f"{tweet_id}_"),
         )

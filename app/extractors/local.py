@@ -71,6 +71,9 @@ class LocalExtractionBackend:
             max_items=settings.max_items_per_job,
             downloader=self.downloader,
             file_cap_bytes=settings.file_cap_bytes,
+            runner=self.runner,
+            native_hevc=settings.native_hevc,
+            min_free_bytes=settings.min_free_disk_bytes,
         )
         self.adapters = adapters or build_adapters(ctx)
         self.resolver = resolver or ShortLinkResolver(
@@ -95,13 +98,15 @@ class LocalExtractionBackend:
             max_total_bytes=self.settings.max_temp_bytes_per_job,
             max_items=self.settings.max_items_per_job,
         )
-        # The one permitted transformation: a provably lossless stream-copy remux (Media mode only).
+        # Ensure Media-mode videos are Telegram-playable: lossless remux first, else H.264/AAC transcode.
         assets = await prepare_assets(
             result.assets,
             mode=request.delivery_mode,
             native_hevc=self.settings.native_hevc,
             runner=self.runner,
             min_free_bytes=self.settings.min_free_disk_bytes,
+            max_file_bytes=self.settings.file_cap_bytes,
+            deadline=deadline,
         )
         return result.model_copy(update={"assets": assets})
 

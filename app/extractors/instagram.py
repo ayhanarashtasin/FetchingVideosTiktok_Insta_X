@@ -31,7 +31,6 @@ from app.core.contracts import (
     Platform,
     PostManifest,
     PostType,
-    Processing,
 )
 from app.core.deadline import Deadline
 from app.core.errors import BotError, ErrorCode
@@ -110,9 +109,9 @@ class InstagramAdapter:
         info = await self.ctx.ytdlp.discover(
             request.extraction_url, workspace, deadline, hint="reel", session_supported=True
         )
-        if len(info.entries) != 1 or info.entries[0].id != code:
+        entry = info.entries[0] if len(info.entries) == 1 else None
+        if entry is None or (entry.id != code and entry.display_id != code):
             raise BotError(ErrorCode.EXTRACTOR_CHANGED, "yt-dlp did not return exactly the requested reel")
-        entry = info.entries[0]
         choice = select_format(entry.formats)
         manifest = PostManifest(
             platform=Platform.INSTAGRAM,
@@ -285,7 +284,7 @@ class InstagramAdapter:
         self, request: ExtractionRequest, found: Discovered, workspace: Path, deadline: Deadline
     ) -> FetchOutcome:
         item = found.manifest.items[0]
-        path, choice, note = await fetch_ytdlp_video(
+        path, choice, processing, note = await fetch_ytdlp_video(
             self.ctx,
             request.extraction_url,
             item.candidate_formats,
@@ -293,6 +292,7 @@ class InstagramAdapter:
             found.yt_info_json,
             workspace,
             deadline,
+            mode=request.delivery_mode,
             duration=found.yt_duration,
             hint="reel",
             session_supported=True,
@@ -303,7 +303,7 @@ class InstagramAdapter:
             ItemKind.VIDEO,
             path,
             source_format=choice.video.format_id if choice.video else None,
-            processing=Processing.MERGED if choice.merge else Processing.UNCHANGED,
+            processing=processing,
             quality_note=note,
         )
         return FetchOutcome(items=[fetched], expected_count=1, count_verified=True)
@@ -323,6 +323,7 @@ class InstagramAdapter:
             use_cookies=found.use_cookies,
             hint=found.hint or "post",
             session_supported=True,
+            mode=request.delivery_mode,
             # Stories have no yt-dlp fallback: its story extractor returns the whole reel, so matching
             # the right entry would be guesswork.
             ytdlp_id_matches=None if (found.hint == "story" or shortcode is None) else (lambda i: i == shortcode),

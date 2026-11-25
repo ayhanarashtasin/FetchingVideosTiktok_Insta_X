@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from app.core.contracts import (
+    DeliveryMode,
     ExtractionRequest,
     FormatDescriptor,
     ItemDescriptor,
@@ -32,12 +33,14 @@ from app.core.deadline import Deadline
 from app.core.errors import BotError, ErrorCode
 from app.extractors.direct_download import (
     DirectDownloadUnavailable,
+    DirectFormatMissing,
     DirectMediaDownloader,
     DirectTarget,
     FileTooLargeDirect,
 )
 from app.extractors.gallerydl_runner import GalleryDlRunner
 from app.extractors.ytdlp_runner import YtDlpRunner, YtFormatSource
+from app.services.subprocess_runner import ProcessRunner
 
 PHOTO_EXT = frozenset({"jpg", "jpeg", "png", "webp", "avif", "heic"})
 VIDEO_EXT = frozenset({"mp4", "m4v", "mov", "webm", "mkv"})
@@ -52,6 +55,9 @@ class ExtractionContext:
     max_items: int = 30
     downloader: DirectMediaDownloader | None = None
     file_cap_bytes: int | None = None
+    runner: ProcessRunner | None = None
+    native_hevc: bool = False
+    min_free_bytes: int = 0
 
 
 @dataclass
@@ -239,6 +245,15 @@ async def try_direct_gallerydl(
         return None
 
 
+def _is_direct_source(src: YtFormatSource | None) -> bool:
+    return (
+        src is not None
+        and (src.protocol or "https").lower() in {"https", "http"}
+        and bool(src.ext)
+        and bool(_SAFE_EXT.fullmatch(src.ext or ""))
+    )
+
+
 async def fetch_ytdlp_video(
     ctx: ExtractionContext,
     url: str,
@@ -248,19 +263,21 @@ async def fetch_ytdlp_video(
     workspace: Path,
     deadline: Deadline,
     *,
+    mode: DeliveryMode = DeliveryMode.MEDIA,
     duration: float | None = None,
     forced_downgrade: bool = False,
     prefix: str = "yt",
     hint: str | None = None,
     session_supported: bool = False,
     use_cookies: bool = False,
-) -> tuple[Path, Any, str | None]:
-    """Fetch the highest source variant that fits under `ctx.file_cap_bytes` without re-encoding.
+) -> tuple[Path, Any, Processing, str | None]:
+    """Fetch the highest source variant that fits under `ctx.file_cap_bytes`.
 
-    Tries direct parallel byte-range download for progressive URLs (checking Content-Length /
-    Content-Range before downloading), falling back to `yt-dlp --load-info-json`. When a lower
-    source variant had to be chosen, returns a human-readable `quality_note` for the caption.
+    Uses direct parallel byte-range downloads for progressive single-stream AND split video+audio
+    variants (merging/transcoding in one FFmpeg pass without spawning a 2nd yt-dlp subprocess),
+    falling back to `yt-dlp --load-info-json` whenever direct fetch is unavailable.
     """
+    from app.media.prepare import merge_tracks_to_mp4
     from app.media.quality import (
         estimated_choice_bytes,
         exact_choice_bytes,
@@ -273,6 +290,7 @@ async def fetch_ytdlp_video(
     cap = ctx.file_cap_bytes
     skipped_oversized = forced_downgrade
     oversized_tiers: list[tuple[int, float]] = []  # (pixels, tbr) already proven > cap
+    last_format_err: BotError | None = None
 
     def _pixels_of(c: Any) -> int:
         v = c.video
@@ -285,13 +303,11 @@ async def fetch_ytdlp_video(
         if cap is not None and has_smaller and any(px >= fp and tbr >= ft * 0.95 for fp, ft in oversized_tiers):
             skipped_oversized = True
             continue
-        src = sources.get(choice.video.format_id) if (not choice.merge and choice.video is not None) else None
-        can_direct = (
-            ctx.downloader is not None
-            and src is not None
-            and (src.protocol or "https").lower() in {"https", "http"}
-            and bool(src.ext)
-            and bool(_SAFE_EXT.fullmatch(src.ext or ""))
+        v_src = sources.get(choice.video.format_id) if choice.video is not None else None
+        a_src = sources.get(choice.audio.format_id) if (choice.merge and choice.audio is not None) else None
+        can_direct = ctx.downloader is not None and not choice.merge and _is_direct_source(v_src)
+        can_direct_merge = (
+            ctx.downloader is not None and choice.merge and _is_direct_source(v_src) and _is_direct_source(a_src)
         )
 
         if cap is not None:
@@ -310,12 +326,13 @@ async def fetch_ytdlp_video(
                     continue
 
         path: Path | None = None
+        processing: Processing = Processing.MERGED if choice.merge else Processing.UNCHANGED
         if can_direct:
-            assert ctx.downloader is not None and src is not None and src.ext is not None
-            dest = workspace / f"{prefix}_1_direct.{src.ext.lower()}"
+            assert ctx.downloader is not None and v_src is not None and v_src.ext is not None
+            dest = workspace / f"{prefix}_1_direct.{v_src.ext.lower()}"
             try:
                 downloaded = await ctx.downloader.download_many(
-                    [DirectTarget(key=1, url=src.url, dest=dest, headers=src.headers)],
+                    [DirectTarget(key=1, url=v_src.url, dest=dest, headers=v_src.headers)],
                     workspace,
                     deadline,
                     max_file_bytes=cap,
@@ -326,8 +343,70 @@ async def fetch_ytdlp_video(
                 if px > 0:
                     oversized_tiers.append((px, tbr))
                 continue
+            except DirectFormatMissing:
+                if has_smaller:
+                    last_format_err = BotError(ErrorCode.NOT_FOUND_OR_EXPIRED, "format url returned 404/410")
+                    continue
+                path = None
             except DirectDownloadUnavailable:
                 path = None
+        elif can_direct_merge:
+            assert (
+                ctx.downloader is not None
+                and v_src is not None
+                and v_src.ext is not None
+                and a_src is not None
+                and a_src.ext is not None
+                and choice.audio is not None
+            )
+            v_dest = workspace / f"{prefix}_1_v.{v_src.ext.lower()}"
+            a_dest = workspace / f"{prefix}_1_a.{a_src.ext.lower()}"
+            merged_dest = workspace / f"{prefix}_1_merged.mp4"
+            downloaded_pair: dict[int, Path] | None = None
+            try:
+                downloaded_pair = await ctx.downloader.download_many(
+                    [
+                        DirectTarget(key=1, url=v_src.url, dest=v_dest, headers=v_src.headers),
+                        DirectTarget(key=2, url=a_src.url, dest=a_dest, headers=a_src.headers),
+                    ],
+                    workspace,
+                    deadline,
+                    max_file_bytes=cap,
+                )
+            except FileTooLargeDirect:
+                skipped_oversized = True
+                if px > 0:
+                    oversized_tiers.append((px, tbr))
+                continue
+            except DirectFormatMissing:
+                if has_smaller:
+                    last_format_err = BotError(ErrorCode.NOT_FOUND_OR_EXPIRED, "split format url returned 404/410")
+                    continue
+                downloaded_pair = None
+            except DirectDownloadUnavailable:
+                downloaded_pair = None
+            if downloaded_pair is not None:
+                v_path, a_path = downloaded_pair[1], downloaded_pair[2]
+                try:
+                    merged = await merge_tracks_to_mp4(
+                        v_path,
+                        a_path,
+                        merged_dest,
+                        mode=mode,
+                        audio_codec=choice.audio.acodec,
+                        native_hevc=ctx.native_hevc,
+                        runner=ctx.runner,
+                        timeout=max(1.0, deadline.remaining()),
+                        min_free_bytes=ctx.min_free_bytes,
+                        max_file_bytes=cap,
+                    )
+                    if merged is not None:
+                        path, processing = merged
+                finally:
+                    with contextlib.suppress(OSError):
+                        v_path.unlink(missing_ok=True)
+                    with contextlib.suppress(OSError):
+                        a_path.unlink(missing_ok=True)
 
         if path is None:
             try:
@@ -344,11 +423,18 @@ async def fetch_ytdlp_video(
                     prefix=prefix,
                 )
                 path = paths[0]
+                processing = Processing.MERGED if choice.merge else Processing.UNCHANGED
             except BotError as err:
                 if cap is not None and err.code is ErrorCode.LIMIT_EXCEEDED and err.reason == "filesize":
                     skipped_oversized = True
                     if px > 0:
                         oversized_tiers.append((px, tbr))
+                    continue
+                if has_smaller and (
+                    err.code is ErrorCode.NOT_FOUND_OR_EXPIRED
+                    or (err.code is ErrorCode.EXTRACTOR_CHANGED and err.reason == "no_video")
+                ):
+                    last_format_err = err
                     continue
                 raise
 
@@ -368,13 +454,15 @@ async def fetch_ytdlp_video(
 
         note = (
             format_quality_note(choice, None if (forced_downgrade and idx == 0) else top, cap)
-            if (cap is not None and (idx > 0 or forced_downgrade))
+            if (cap is not None and skipped_oversized)
             else None
         )
-        return path, choice, note
+        return path, choice, processing, note
 
     if skipped_oversized and cap is not None:
         raise BotError(ErrorCode.FILE_TOO_LARGE, "all source video variants exceed upload limit")
+    if last_format_err is not None:
+        raise last_format_err
     raise BotError(ErrorCode.EXTRACTOR_CHANGED, "no playable video format could be downloaded")
 
 
@@ -387,6 +475,7 @@ async def ytdlp_single_video(
     id_matches: Callable[[str], bool],
     hint: str,
     session_supported: bool,
+    mode: DeliveryMode = DeliveryMode.MEDIA,
     use_cookies: bool = False,
     forced_downgrade: bool = False,
 ) -> tuple[Path, str | None, Processing, str | None]:
@@ -405,7 +494,7 @@ async def ytdlp_single_video(
     matched = id_matches(entry.id) or (bool(entry.display_id) and id_matches(entry.display_id))
     if not matched:
         raise BotError(ErrorCode.EXTRACTOR_CHANGED, "fallback did not return exactly the requested post")
-    path, choice, note = await fetch_ytdlp_video(
+    path, choice, processing, note = await fetch_ytdlp_video(
         ctx,
         url,
         entry.formats,
@@ -413,6 +502,7 @@ async def ytdlp_single_video(
         info.info_json,
         workspace,
         deadline,
+        mode=mode,
         duration=entry.duration,
         forced_downgrade=forced_downgrade,
         prefix="fb",
@@ -423,7 +513,7 @@ async def ytdlp_single_video(
     return (
         path,
         choice.video.format_id if choice.video else None,
-        Processing.MERGED if choice.merge else Processing.UNCHANGED,
+        processing,
         note,
     )
 
@@ -444,6 +534,7 @@ async def fetch_via_gallerydl(
     session_supported: bool,
     ytdlp_id_matches: Callable[[str], bool] | None,
     direct_headers: Mapping[str, str] | None = None,
+    mode: DeliveryMode = DeliveryMode.MEDIA,
 ) -> FetchOutcome:
     """Download a gallery-dl-discovered post and map the files back to manifest items by identity.
 
@@ -484,6 +575,7 @@ async def fetch_via_gallerydl(
                 id_matches=ytdlp_id_matches,
                 hint=hint,
                 session_supported=session_supported,
+                mode=mode,
                 use_cookies=use_cookies,
                 forced_downgrade=True,
             )
@@ -549,6 +641,7 @@ async def fetch_via_gallerydl(
                     id_matches=ytdlp_id_matches,
                     hint=hint,
                     session_supported=session_supported,
+                    mode=mode,
                     use_cookies=use_cookies,
                     forced_downgrade=True,
                 )
@@ -574,6 +667,7 @@ async def fetch_via_gallerydl(
                 id_matches=ytdlp_id_matches,
                 hint=hint,
                 session_supported=session_supported,
+                mode=mode,
                 use_cookies=use_cookies,
             )
             items = [FetchedItem(only.source_item_id, only.position, ItemKind.VIDEO, path, fmt, processing, note)]

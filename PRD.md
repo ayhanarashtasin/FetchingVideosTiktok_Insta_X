@@ -146,7 +146,7 @@ The `Original files` button is shown in Media mode for successful results within
 | --- | --- |
 | Video has separate audio/video streams | Select best compatible source streams and losslessly merge/remux where possible. |
 | Video is already suitable for Telegram playback | Upload natively as a video, with no intentional quality reduction. |
-| Video is not natively playable without re-encoding | Try a compatible lossless remux; otherwise send as a document and explain why. |
+| Video is not natively playable without re-encoding | Try a compatible lossless remux first; in Media mode fall back to H.264 (`yuv420p`) + AAC `.mp4` transcode for inline playback (else send as a document). |
 | Photo is sent as a native Telegram photo | Preview may be compressed/resized by Telegram; do not label it bit-identical. Offer Original files. |
 | Original files mode | Send as documents; do not intentionally resize or re-encode. Photos preserve downloaded bytes; merged/remuxed video preserves encoded stream quality. |
 | File exceeds upload limit | Use configured local Bot API if within its limits; otherwise return a clear size error. Never silently reduce resolution. |

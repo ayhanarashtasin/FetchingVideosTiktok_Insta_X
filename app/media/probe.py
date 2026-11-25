@@ -164,6 +164,7 @@ async def probe_file(
     runner: ProcessRunner | None = None,
     ffprobe: str | None = None,
     timeout: float = 30.0,
+    compute_hash: bool = True,
 ) -> ProbeInfo:
     """Probe one local file. Never raises anything but BotError(MEDIA_INVALID/DOWNLOAD_TIMEOUT)."""
     path = Path(path)
@@ -194,7 +195,7 @@ async def probe_file(
         timeout=timeout,
         max_stdout=2_000_000,
     )
-    if size <= HASH_VIDEO_LIMIT:
+    if compute_hash and size <= HASH_VIDEO_LIMIT:
         # Overlap disk hashing with ffprobe startup/execution so hashing adds ~0 ms wall time.
         result, digest = await asyncio.gather(probe_coro, asyncio.to_thread(_sha256, path))
     else:
@@ -209,7 +210,7 @@ async def probe_file(
     except ValueError:
         raise BotError(ErrorCode.MEDIA_INVALID, "ffprobe output was not JSON") from None
     info = parse_probe(data, path, size)
-    if digest is None and info.kind is ItemKind.PHOTO:
+    if compute_hash and digest is None and info.kind is ItemKind.PHOTO:
         digest = await asyncio.to_thread(_sha256, path)
     if digest is not None:
         info = ProbeInfo(**{**info.__dict__, "sha256": digest})

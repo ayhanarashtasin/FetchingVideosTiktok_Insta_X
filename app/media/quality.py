@@ -77,6 +77,13 @@ def _safe(f: FormatDescriptor) -> bool:
     return bool(_SAFE_FORMAT_ID.fullmatch(f.format_id))
 
 
+def is_unplayable_format(f: FormatDescriptor) -> bool:
+    """Reject provider formats marked unplayable or using unsupported ByteDance VVC/bytevc2 codecs."""
+    vcodec = (f.vcodec or "").lower()
+    note = (f.note or "").lower()
+    return "bytevc2" in vcodec or "vvc" in vcodec or "unplayable" in note
+
+
 def select_format(formats: list[FormatDescriptor]) -> FormatChoice:
     """Pick the best source representation. Raises EXTRACTOR_CHANGED if nothing playable exists."""
     return ranked_choices(formats)[0]
@@ -89,8 +96,12 @@ def ranked_choices(formats: list[FormatDescriptor]) -> list[FormatChoice]:
     to the highest source variant that fits under Telegram's upload cap without re-encoding.
     """
     indexed = list(enumerate(formats))
-    muxed = [(i, f) for i, f in indexed if f.has_video and f.has_audio and (f.vcodec or "") != "none"]
-    video_only = [(i, f) for i, f in indexed if f.has_video and not f.has_audio]
+    muxed = [
+        (i, f)
+        for i, f in indexed
+        if f.has_video and f.has_audio and (f.vcodec or "") != "none" and not is_unplayable_format(f)
+    ]
+    video_only = [(i, f) for i, f in indexed if f.has_video and not f.has_audio and not is_unplayable_format(f)]
     audio_only = [(i, f) for i, f in indexed if f.has_audio and not f.has_video]
 
     best_audio = max(audio_only, key=lambda p: _audio_key(p[1], p[0]), default=None)

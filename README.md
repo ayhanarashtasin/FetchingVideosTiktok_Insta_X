@@ -2,8 +2,9 @@
 
 A self-hosted Telegram bot for TikTok, Instagram and X/Twitter that runs **natively** on **Windows** and **Linux VPS**
 (no Docker required). Paste **one** post URL in a private chat to receive the photos and videos in source order with the
-original link and an *Original files* button for byte-exact delivery. It never re-encodes, resizes or substitutes media:
-if Telegram cannot play a file natively it is sent unchanged as a document, and a file that is too large is reported,
+original link and an *Original files* button for byte-exact photo delivery. It never silently downscales or
+substitutes media: in Media mode non-native videos are losslessly remuxed first (or auto-transcoded to H.264/AAC `.mp4`
+when needed for inline playback), Original-files mode keeps source bytes untouched, and oversized files are reported,
 not shrunk.
 
 Specifications: [PRD](PRD.md) · [Architecture](architecture.md) · [Task plan](tasks.md) · [Dev log](ops/dev-log.md)
@@ -33,7 +34,7 @@ have been run and recorded.
 | X/Twitter post (photos, video, GIF, mixed) | The post's own attachments, in order | Quoted-post and retweet media are rejected; no session is ever used. |
 
 Not supported, by design: private or restricted content, profiles/highlights/lives/ads, anything that needs
-defeating a login, CAPTCHA or rate limit, more than one link per message, group chats, transcoding.
+defeating a login, CAPTCHA or rate limit, more than one link per message, group chats.
 
 ## Prerequisites
 
@@ -140,7 +141,7 @@ automatically, you get a Retry button).
   egress proxy on `127.0.0.1`.
 * **Secrets:** Never in logs, Telegram or git (a pre-commit scanner in `.githooks/pre-commit` enforces it); the optional
   Instagram cookies file is copied privately per job inside the throw-away workspace so the original is never modified.
-* **Honesty:** No silent downscale, re-encode or thumbnail substitution; counts and omissions are reported.
+* **Honesty:** No silent downscale or thumbnail substitution; Original-files mode never re-encodes; counts and omissions are reported.
 
 ## Verifying it for real (Owner-Only Live Acceptance)
 
@@ -196,7 +197,7 @@ Extractors are pinned exactly in `pyproject.toml`, `uv.lock`, and `requirements.
 app/bot/          Telegram handlers, authorization, keyboards, messages, notifier
 app/core/         contracts, state machine, URL validator, net guard, job queue, runner, retries
 app/extractors/   adapters (TikTok/Instagram/X), tool runners, optional worker service + client, short-link resolver
-app/media/        probe, quality selection, lossless remux, delivery planner
+app/media/        probe, quality selection, lossless remux / H.264 auto-transcode, delivery planner
 app/services/     subprocess runner, workspaces, Telegram sender, optional egress proxy, alerts, health
 app/storage/      SQLite (WAL) and migrations
 ops/              setup-ubuntu.sh, deploy, troubleshooting, dev log, feasibility evidence, test report

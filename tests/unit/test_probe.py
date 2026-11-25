@@ -38,6 +38,8 @@ async def test_h264_aac_mp4(media):
     assert (info.video_codec, info.audio_codec, info.pix_fmt) == ("h264", "aac", "yuv420p")
     assert info.has_audio and (info.width, info.height) == (160, 120)
     assert 0.5 < info.duration_seconds < 2 and info.sha256  # small videos are hashed too
+    unhashed = await probe_file(media.mp4_h264_aac, compute_hash=False)
+    assert unhashed.sha256 is None and unhashed.video_codec == "h264"
 
 
 async def test_silent_video_is_reported_as_silent(media):

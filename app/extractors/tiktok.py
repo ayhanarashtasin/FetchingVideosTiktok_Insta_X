@@ -22,7 +22,6 @@ from app.core.contracts import (
     Platform,
     PostManifest,
     PostType,
-    Processing,
 )
 from app.core.deadline import Deadline
 from app.core.errors import BotError, ErrorCode
@@ -182,7 +181,7 @@ class TikTokAdapter:
         self, request: ExtractionRequest, found: Discovered, workspace: Path, deadline: Deadline
     ) -> FetchOutcome:
         item = found.manifest.items[0]
-        path, choice, note = await fetch_ytdlp_video(
+        path, choice, processing, note = await fetch_ytdlp_video(
             self.ctx,
             request.extraction_url,
             item.candidate_formats,
@@ -190,6 +189,7 @@ class TikTokAdapter:
             found.yt_info_json,
             workspace,
             deadline,
+            mode=request.delivery_mode,
             duration=found.yt_duration,
             hint="video",
         )
@@ -199,7 +199,7 @@ class TikTokAdapter:
             kind=ItemKind.VIDEO,
             path=path,
             source_format=choice.video.format_id if choice.video else None,
-            processing=Processing.MERGED if choice.merge else Processing.UNCHANGED,
+            processing=processing,
             quality_note=note,
         )
         return FetchOutcome(items=[fetched], expected_count=1, count_verified=True)

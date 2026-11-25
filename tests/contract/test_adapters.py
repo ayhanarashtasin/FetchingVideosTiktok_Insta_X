@@ -669,3 +669,67 @@ async def test_result_is_unverified_when_the_source_cannot_prove_completeness(tm
     assert (
         await finalize_outcome(outcome, manifest, tmp_path, max_total_bytes=10**9, max_items=30)
     ).completeness == "complete"
+
+
+async def test_tiktok_skips_bytevc2_and_transcodes_hevc_in_media_mode_only(world):
+    from app.core.contracts import DeliveryMode
+
+    payload = fixture("ytdlp_tiktok_video")
+    payload = {
+        **payload,
+        "formats": [
+            {
+                "format_id": "bytevc2_1080p_1",
+                "ext": "mp4",
+                "vcodec": "bytevc2",
+                "acodec": "aac",
+                "width": 1080,
+                "height": 1920,
+                "tbr": 3000.0,
+                "format_note": "Playback video (UNPLAYABLE)",
+            },
+            *payload["formats"],
+        ],
+    }
+    world.fake.yt_info(TT_VIDEO, payload)
+    world.fake.yt_file(TT_VIDEO, world.media.mp4_hevc_aac)
+    manifest, result = await world.run(TT_VIDEO)
+    assert manifest.post_type is PostType.VIDEO
+    (asset,) = result.assets
+    assert asset.source_format == "bytevc1_720p_1"
+    assert asset.processing is Processing.TRANSCODED
+    assert (asset.container, asset.video_codec, asset.audio_codec, asset.pix_fmt) == ("mp4", "h264", "aac", "yuv420p")
+
+    # Original mode preserves raw HEVC bytes without transcoding.
+    orig_req = world.request(TT_VIDEO).model_copy(update={"delivery_mode": DeliveryMode.ORIGINAL})
+    orig_manifest = await world.backend.discover(orig_req, world.ws, Deadline(60))
+    orig_res = await world.backend.fetch(orig_req, orig_manifest, world.ws, Deadline(60))
+    assert orig_res.assets[0].video_codec == "hevc" and orig_res.assets[0].processing is Processing.UNCHANGED
+
+
+async def test_instagram_non_native_reel_and_video_post_transcode_to_inline_mp4(world):
+    # Reel via yt-dlp returning non-native VP9/Opus WebM
+    world.fake.yt_info(IG_REEL, "ytdlp_instagram_reel")
+    world.fake.yt_file(IG_REEL, world.media.webm_vp9_opus)
+    _, reel_res = await world.run(IG_REEL)
+    (reel_asset,) = reel_res.assets
+    assert reel_asset.processing is Processing.TRANSCODED
+    assert (reel_asset.container, reel_asset.video_codec, reel_asset.audio_codec, reel_asset.pix_fmt) == (
+        "mp4",
+        "h264",
+        "aac",
+        "yuv420p",
+    )
+
+    # /p/ video post via gallery-dl returning HEVC MP4
+    world.fake.gd_dump(IG_POST, "gd_instagram_video_post")
+    world.fake.gd_files(IG_POST, {1: world.media.mp4_hevc_aac})
+    _, post_res = await world.run(IG_POST)
+    (post_asset,) = post_res.assets
+    assert post_asset.processing is Processing.TRANSCODED
+    assert (post_asset.container, post_asset.video_codec, post_asset.audio_codec, post_asset.pix_fmt) == (
+        "mp4",
+        "h264",
+        "aac",
+        "yuv420p",
+    )
