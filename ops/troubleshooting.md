@@ -172,6 +172,12 @@ Fixes, in order of impact:
    * Your own link only carries the message and the stream you watch.
    * Downloads from Telegram measured about 8 Mbit/s per connection on the same home PC, enough for 1080p playback.
 2. **Local Bot API server** on that VPS (`BOT_API_MODE=local`, [deploy guide section 6](deploy.md#6-hosted-vs-local-telegram-bot-api)).
+   * Uploads then go straight to the bot's own Telegram data centre over MTProto, not via `api.telegram.org`. So the
+     host should be near that DC rather than near Amsterdam.
+   * This bot's uploaded files are stored on **DC5 (Singapore)**. That comes from the cached `file_id`s: base64url
+     decode, expand runs of `0x00`, and read the second little-endian int32. Files Telegram fetched by URL showed DC4.
+   * Measured 2026-11-26 from four Singapore datacenters (Globalping, TCP 443, 0% loss): ~158 ms to `api.telegram.org`
+     but ~2 ms to DC5 (`91.108.56.130`). A Singapore VPS therefore pairs best with the local server.
    It lifts the 50 MB cap to 2,000 MB, so HD videos above 49 MB are no longer swapped for a smaller variant.
 3. **`DIRECT_TELEGRAM_URL`** lets Telegram fetch public cookie-free CDN files itself: X videos ≤ 20 MB and photos ≤ 5 MB.
    * The bot probes each file's real size first and skips this path for anything over Telegram's limit. Such a file
