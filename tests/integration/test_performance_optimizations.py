@@ -481,7 +481,7 @@ async def test_finalize_probes_multiple_items_concurrently_and_preserves_order(m
 
 
 # ===================================================================================== Telegram session & status overlap
-def test_tracking_session_tunes_sockets_and_sends_known_content_length(tmp_path):
+def test_tracking_session_keeps_os_autotuned_sockets_and_64k_streaming(tmp_path):
     session = TrackingSession()
     assert session._connector_init["keepalive_timeout"] == 60.0
     assert session._connector_init["socket_factory"] is tuned_socket_factory
@@ -491,7 +491,7 @@ def test_tracking_session_tunes_sockets_and_sends_known_content_length(tmp_path)
     try:
         assert sock.getsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY) != 0
         for opt in (socket.SO_SNDBUF, socket.SO_RCVBUF):
-            if sys.platform.startswith("linux"):  # left to kernel autotuning (an explicit size would lock it)
+            if sys.platform.startswith("linux") or sys.platform == "win32":
                 assert sock.getsockopt(socket.SOL_SOCKET, opt) == plain.getsockopt(socket.SOL_SOCKET, opt)
             else:
                 assert sock.getsockopt(socket.SOL_SOCKET, opt) >= TCP_BUFFER_BYTES
@@ -504,9 +504,10 @@ def test_tracking_session_tunes_sockets_and_sends_known_content_length(tmp_path)
     fd = os.open(p, os.O_RDONLY | getattr(os, "O_BINARY", 0))
     try:
         bot, _ = make_bot()
-        form = session.build_form_data(bot, SendVideo(chat_id=1, video=FdInputFile(fd, "clip.mp4", 1000)))
-        mp = form()
-        assert mp.size is not None and mp.size > 1000, "FdInputFile uploads should carry exact Content-Length"
+        file_obj = FdInputFile(fd, "clip.mp4", 1000)
+        assert file_obj.chunk_size == 64 << 10
+        form = session.build_form_data(bot, SendVideo(chat_id=1, video=file_obj))
+        assert form().size is None, "default streaming multipart avoids Windows ProactorEventLoop 1 MiB drain stalls"
     finally:
         os.close(fd)
 
@@ -1442,3 +1443,168 @@ def test_media_cache_ttl_expiry_and_purge(tmp_path):
         assert db._conn.execute("SELECT COUNT(*) FROM media_cache").fetchone()[0] == 0
     finally:
         db.close()
+
+
+# ===================================================================================== Instagram Reels progressive H.264 & direct URL
+async def test_instagram_reel_prefers_equal_res_progressive_h264_and_enables_direct_url(tmp_path, make_settings):
+    ig_url = "https://www.instagram.com/reel/Chunk8-jurw/"
+    fake = FakeToolRunner()
+    fake.yt_info(
+        ig_url,
+        {
+            "id": "Chunk8-jurw",
+            "extractor_key": "Instagram",
+            "width": 720,
+            "height": 1280,
+            "duration": 5.0,
+            "formats": [
+                {
+                    "format_id": "1",
+                    "url": "https://scontent.cdninstagram.com/v/prog_720.mp4",
+                    "protocol": "https",
+                    "ext": "mp4",
+                    "width": 720,
+                    "height": 1280,
+                    "vcodec": "avc1.64001f",
+                    "acodec": "mp4a.40.2",
+                    "tbr": 1400.0,
+                },
+                {
+                    "format_id": "dash-vp9",
+                    "url": "https://scontent.cdninstagram.com/v/vp9_720.mp4",
+                    "protocol": "https",
+                    "ext": "mp4",
+                    "width": 720,
+                    "height": 1280,
+                    "vcodec": "vp09.00.31.08",
+                    "acodec": "none",
+                    "tbr": 2600.0,
+                },
+                {
+                    "format_id": "dash-a",
+                    "url": "https://scontent.cdninstagram.com/v/audio.m4a",
+                    "protocol": "https",
+                    "ext": "m4a",
+                    "vcodec": "none",
+                    "acodec": "mp4a.40.2",
+                    "tbr": 128.0,
+                },
+            ],
+        },
+    )
+    backend = LocalExtractionBackend(make_settings(), runner=fake, enable_direct_telegram_url=True)
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    try:
+        v = validate_url(ig_url)
+        req = ExtractionRequest(
+            job_id=uuid.uuid4(),
+            owner_id=1,
+            chat_id=1,
+            origin_message_id=1,
+            original_url=ig_url,
+            extraction_url=v.extraction_url,
+            platform=v.platform,
+            post_hint=v.post_hint,
+        )
+        manifest = await backend.discover(req, ws, Deadline(30))
+        cands = await backend.direct_url_candidates(req.job_id, manifest, Deadline(30))
+        assert cands is not None and len(cands) == 1
+        assert cands[0].url == "https://scontent.cdninstagram.com/v/prog_720.mp4"
+        assert (cands[0].width, cands[0].height, cands[0].duration) == (720, 1280, 5.0)
+    finally:
+        await backend.aclose()
+
+
+async def test_instagram_reel_never_downscales_dash_to_dimensionless_progressive_and_guards_direct_url(
+    tmp_path, make_settings
+):
+    ig_url = "https://www.instagram.com/reel/Chunk8-jurw/"
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    v = validate_url(ig_url)
+
+    def _req() -> ExtractionRequest:
+        return ExtractionRequest(
+            job_id=uuid.uuid4(),
+            owner_id=1,
+            chat_id=1,
+            origin_message_id=1,
+            original_url=ig_url,
+            extraction_url=v.extraction_url,
+            platform=v.platform,
+            post_hint=v.post_hint,
+        )
+
+    # 1. Dimensionless progressive `video_versions` must NOT replace higher-res avc1 DASH;
+    #    when silent avc1 DASH is selected (no merge), it is still eligible for direct URL.
+    fake = FakeToolRunner()
+    fake.yt_info(
+        ig_url,
+        {
+            "id": "Chunk8-jurw",
+            "extractor_key": "Instagram",
+            "width": 720,
+            "height": 1280,
+            "formats": [
+                {
+                    "format_id": "0",
+                    "url": "https://scontent.cdninstagram.com/v/prog_480.mp4",
+                    "protocol": "https",
+                    "ext": "mp4",
+                    "vcodec": None,
+                    "acodec": "none",
+                },
+                {
+                    "format_id": "dash-720-avc",
+                    "url": "https://scontent.cdninstagram.com/v/dash_720.mp4",
+                    "protocol": "https",
+                    "ext": "mp4",
+                    "width": 720,
+                    "height": 1280,
+                    "vcodec": "avc1.64001F",
+                    "acodec": "none",
+                    "tbr": 3140.0,
+                },
+            ],
+        },
+    )
+    backend = LocalExtractionBackend(make_settings(), runner=fake, enable_direct_telegram_url=True)
+    try:
+        r1 = _req()
+        m1 = await backend.discover(r1, ws, Deadline(30))
+        c1 = await backend.direct_url_candidates(r1.job_id, m1, Deadline(30))
+        assert c1 is not None and len(c1) == 1
+        assert c1[0].url == "https://scontent.cdninstagram.com/v/dash_720.mp4"
+        assert (m1.items[0].width, m1.items[0].height) == (720, 1280)
+
+        # 2. Non-native VP9-only track or cookie-gated URL must NEVER mark direct_telegram_ok.
+        for bad_fmt in (
+            {
+                "format_id": "dash-vp9",
+                "url": "https://scontent.cdninstagram.com/v/vp9.mp4",
+                "protocol": "https",
+                "ext": "mp4",
+                "width": 720,
+                "height": 1280,
+                "vcodec": "vp09.00.31.08",
+                "acodec": "none",
+            },
+            {
+                "format_id": "1",
+                "url": "https://scontent.cdninstagram.com/v/gated.mp4",
+                "protocol": "https",
+                "ext": "mp4",
+                "width": 720,
+                "height": 1280,
+                "vcodec": "avc1.64001f",
+                "acodec": "mp4a.40.2",
+                "cookies": "sessionid=secret_tok",
+            },
+        ):
+            fake.yt_info(ig_url, {"id": "Chunk8-jurw", "extractor_key": "Instagram", "formats": [bad_fmt]})
+            r_bad = _req()
+            m_bad = await backend.discover(r_bad, ws, Deadline(30))
+            assert await backend.direct_url_candidates(r_bad.job_id, m_bad, Deadline(30)) is None
+    finally:
+        await backend.aclose()

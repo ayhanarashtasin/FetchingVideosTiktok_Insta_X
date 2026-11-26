@@ -133,6 +133,7 @@ set_env_kv WORKER_MODE inprocess "$ENV_MODE"
 set_env_kv MAX_CONCURRENT_JOBS 2 "$ENV_MODE"
 set_env_kv MAX_TEMP_BYTES_PER_JOB 1000000000 "$ENV_MODE"
 set_env_kv MIN_FREE_DISK_BYTES 2000000000 "$ENV_MODE"
+set_env_kv NATIVE_HEVC true "$ENV_MODE"
 
 CUR_TOKEN_FILE="$(get_env_val BOT_TOKEN_FILE)"
 CUR_TOKEN="$(get_env_val BOT_TOKEN)"
@@ -167,7 +168,7 @@ UNIT_FILE="/etc/systemd/system/tmd-bot.service"
 cat > "$UNIT_FILE" <<EOF
 [Unit]
 Description=Telegram Media Downloader Bot
-After=network-online.target
+After=network-online.target telegram-bot-api.service
 Wants=network-online.target
 
 [Service]

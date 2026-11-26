@@ -171,19 +171,24 @@ async def test_pinned_resolver_filters_by_family():
     assert all(r["port"] == 443 and r["hostname"] == "h.example" for r in both)
 
 
-@pytest.mark.parametrize("linux", [True, False])
-def test_socket_tuning_keeps_linux_autotuning_and_enlarges_elsewhere(monkeypatch, linux):
-    """On Linux an explicit SO_SNDBUF/SO_RCVBUF locks the buffer (autotuning off) and is clamped to
-    net.core.*mem_max (208 KiB by default), which would cap long-RTT uploads; elsewhere enlarge to 1 MiB."""
+@pytest.mark.parametrize("autotuned", [True, False])
+def test_socket_tuning_keeps_os_autotuning_and_enlarges_elsewhere(monkeypatch, autotuned):
+    """On Linux and Windows an explicit SO_SNDBUF/SO_RCVBUF disables OS TCP buffer autotuning;
+    elsewhere enlarge buffers to 1 MiB. TCP_NODELAY is always enabled."""
+    import sys
+
     import app.core.net_guard as ng
 
-    monkeypatch.setattr(ng, "_KERNEL_AUTOTUNES_BUFFERS", linux)
+    if sys.platform.startswith("linux") or sys.platform == "win32":
+        assert ng._KERNEL_AUTOTUNES_BUFFERS is True
+
+    monkeypatch.setattr(ng, "_KERNEL_AUTOTUNES_BUFFERS", autotuned)
     tuned = ng.tuned_socket_factory((socket.AF_INET, socket.SOCK_STREAM, 0))
     plain = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     try:
         assert tuned.getsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY) != 0
         for opt in (socket.SO_SNDBUF, socket.SO_RCVBUF):
-            if linux:
+            if autotuned:
                 assert tuned.getsockopt(socket.SOL_SOCKET, opt) == plain.getsockopt(socket.SOL_SOCKET, opt)
             else:
                 assert tuned.getsockopt(socket.SOL_SOCKET, opt) >= ng.TCP_BUFFER_BYTES

@@ -23,19 +23,18 @@ import aiohttp.abc
 
 from app.core.errors import BotError, ErrorCode
 
-TCP_BUFFER_BYTES = 1 << 20  # 1 MiB (vs Windows' 64 KiB default) for high-RTT uploads/downloads
-# Linux autotunes each TCP connection's buffers up to net.ipv4.tcp_wmem/tcp_rmem max (4 MiB / 6 MiB by default).
-# An explicit SO_SNDBUF/SO_RCVBUF LOCKS the buffer (autotuning off) and is silently clamped to
-# net.core.wmem_max/rmem_max - 208 KiB on stock kernels - so on Linux "enlarging" would actually cap a long-RTT
-# upload (e.g. a VPS in Singapore -> api.telegram.org in Amsterdam, ~160 ms) to a fraction of the link.
-_KERNEL_AUTOTUNES_BUFFERS = sys.platform.startswith("linux")
+TCP_BUFFER_BYTES = 1 << 20  # 1 MiB fallback for OSes without dynamic TCP buffer autotuning
+# Linux (tcp_wmem/tcp_rmem) and Windows 10/11 (Winsock Dynamic Send Buffering + Receive Window Auto-Tuning)
+# both autotune per-connection TCP buffers. Forcing SO_SNDBUF/SO_RCVBUF disables autotuning: on Linux it
+# clamps to net.core.*mem_max (~208 KiB), and on Windows it over-buffers high-RTT/low-rate links (24s -> 34s).
+_KERNEL_AUTOTUNES_BUFFERS = sys.platform.startswith("linux") or sys.platform == "win32"
 
 
 def tune_socket(sock: socket.socket) -> None:
     """Enable TCP_NODELAY and enlarge send/recv buffers (never shrinking larger OS defaults).
 
-    On Linux only TCP_NODELAY is set: the kernel's per-connection autotuning already grows past 1 MiB,
-    and setting a size would disable it (see `_KERNEL_AUTOTUNES_BUFFERS`).
+    On Linux and Windows only TCP_NODELAY is set: the OS's per-connection autotuning already manages
+    buffer sizing, and setting an explicit size disables it (see `_KERNEL_AUTOTUNES_BUFFERS`).
     """
     with contextlib.suppress(OSError):
         sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)

@@ -48,7 +48,7 @@ from app.extractors.base import (
     gaps_in_numbering,
     manifest_items,
 )
-from app.media.quality import select_format
+from app.media.quality import is_native_video, select_format
 
 _POST_CODE = re.compile(r"/(?:p|reel|reels|tv)/(?P<code>[A-Za-z0-9_\-]+)/?$")
 _STORY = re.compile(r"/stories/(?P<user>[A-Za-z0-9._]+)/(?P<id>\d+)/?$")
@@ -112,7 +112,13 @@ class InstagramAdapter:
         entry = info.entries[0] if len(info.entries) == 1 else None
         if entry is None or (entry.id != code and entry.display_id != code):
             raise BotError(ErrorCode.EXTRACTOR_CHANGED, "yt-dlp did not return exactly the requested reel")
+        # Instagram logged-out GraphQL omits width/height on progressive `video_versions`, while yt-dlp
+        # populates `entry.width`/`entry.height` from its top DASH track (e.g. Chunk8-jurw: 480x854
+        # progressive vs 720x1280 avc1 DASH). Never backfill entry dimensions onto dimensionless formats
+        # when any dimensioned track exists, or we would silently downscale higher-res DASH tracks.
         choice = select_format(entry.formats)
+        width = (choice.video.width if choice.video else None) or entry.width
+        height = (choice.video.height if choice.video else None) or entry.height
         manifest = PostManifest(
             platform=Platform.INSTAGRAM,
             post_id=code,
@@ -125,16 +131,40 @@ class InstagramAdapter:
                     source_item_id=code,
                     position=0,
                     kind=ItemKind.VIDEO,
-                    width=choice.video.width if choice.video else entry.width,
-                    height=choice.video.height if choice.video else entry.height,
+                    width=width,
+                    height=height,
                     candidate_formats=entry.formats,
                 )
             ],
         )
+        urls: dict[int, tuple[str, str]] = {}
+        direct_telegram_ok = False
+        if not choice.merge and choice.video is not None:
+            src = entry.sources.get(choice.video.format_id)
+            ext = ((src.ext if src else None) or choice.video.ext or "").lower()
+            native_ok = is_native_video(
+                container=ext,
+                video_codec=choice.video.vcodec or "h264",
+                audio_codec=None if (not choice.video.acodec or choice.video.acodec == "none") else choice.video.acodec,
+                pix_fmt=None,
+                native_hevc=self.ctx.native_hevc,
+            )
+            if (
+                src is not None
+                and (src.protocol or "https").lower() == "https"
+                and src.url.startswith("https://")
+                and native_ok
+                and not any(k.lower() == "cookie" for k in src.headers)
+            ):
+                urls[0] = (src.url, ext)
+                direct_telegram_ok = True
         return Discovered(
             manifest,
             "ytdlp",
             nums={0: 1},
+            urls=urls,
+            durations={0: entry.duration} if entry.duration else {},
+            direct_telegram_ok=direct_telegram_ok,
             yt_info_json=info.info_json,
             yt_sources=entry.sources,
             yt_duration=entry.duration,

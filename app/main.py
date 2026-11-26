@@ -27,9 +27,8 @@ from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.client.telegram import TelegramAPIServer
 from aiogram.exceptions import TelegramUnauthorizedError
 from aiogram.methods import GetUpdates, TelegramMethod
-from aiogram.types import InputFile, ReplyParameters
-from aiohttp import FormData, TCPConnector
-from aiohttp.payload import AsyncIterablePayload
+from aiogram.types import ReplyParameters
+from aiohttp import TCPConnector
 
 from app.bot import callbacks, handlers, messages
 from app.bot.auth import AuthMiddleware
@@ -57,43 +56,17 @@ HOUSEKEEPING_INTERVAL = 30.0
 POLL_WATCHDOG_SECONDS = 300.0
 
 
-class _SizedAsyncPayload(AsyncIterablePayload):
-    """AsyncIterablePayload with a pre-verified byte size so aiohttp sends Content-Length."""
-
-    def __init__(self, value: Any, *, size: int, **kwargs: Any) -> None:
-        super().__init__(value, **kwargs)
-        self._size = size
-
-
 class TrackingSession(AiohttpSession):
-    """Tracks `getUpdates` liveness and tunes sockets/uploads for high-RTT Telegram uploads."""
+    """Tracks `getUpdates` liveness and keeps warm, TCP_NODELAY sockets for Telegram requests."""
 
     last_poll_ok: float | None = None
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
         if self._connector_type is TCPConnector:
-            # Keep warm TLS connections across extractions and raise Windows' 64 KiB socket buffers.
+            # Keep warm TLS connections across extractions and enable TCP_NODELAY via tuned_socket_factory.
             self._connector_init["keepalive_timeout"] = 60.0
             self._connector_init["socket_factory"] = tuned_socket_factory
-
-    def build_form_data(self, bot: Bot, method: TelegramMethod) -> FormData:  # type: ignore[override]
-        form = FormData(quote_fields=False)
-        files: dict[str, InputFile] = {}
-        for key, value in method.model_dump(warnings=False).items():
-            prepared = self.prepare_value(value, bot=bot, files=files)
-            if not prepared:
-                continue
-            form.add_field(key, prepared)
-        for key, file_obj in files.items():
-            name = file_obj.filename or key
-            size = getattr(file_obj, "size", None)
-            if isinstance(size, int) and size >= 0:
-                body: Any = _SizedAsyncPayload(file_obj.read(bot), size=size, filename=name)
-            else:
-                body = file_obj.read(bot)
-            form.add_field(key, body, filename=name)
-        return form
 
     async def make_request(
         self,

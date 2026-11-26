@@ -1,39 +1,57 @@
-"""Fast in-process async HTTP metadata extractors (FxTwitter + X Syndication).
+"""Fast in-process async HTTP metadata extractors (FxTwitter, X Syndication, TikTok web JSON).
 
-Eliminates cold subprocess startup and uncached X guest-token rate limits for public X/Twitter
-posts while preserving strict single-post identity verification:
-* every response must match the exact requested `tweet_id`;
+Eliminates cold subprocess startup and uncached guest-token rate limits for public X/Twitter and
+TikTok posts while preserving strict single-post identity verification:
+* every response must match the exact requested `tweet_id` / `post_id`;
 * retweets and quoted-tweet media are never returned (only direct attachments of the linked post);
 * uses a pooled, SSRF-safe `aiohttp` session (`PinnedResolver` or configured `egress_proxy_url`);
-* any error or ambiguity returns `None` so the caller falls back cleanly to `gallery-dl` / `yt-dlp`.
+* any error, challenge, private item, or ambiguity returns `None` so the caller falls back cleanly
+  to `gallery-dl` / `yt-dlp`.
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import math
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from typing import Any
-from urllib.parse import parse_qs, urlencode, urlsplit, urlunsplit
+from urllib.parse import parse_qs, urlencode, urljoin, urlsplit, urlunsplit
 
 import aiohttp
 
-from app.core.contracts import ItemKind
+from app.core.contracts import FormatDescriptor, ItemKind
 from app.core.deadline import Deadline
 from app.core.errors import BotError
-from app.core.net_guard import PinnedResolver, Resolver, is_ip_literal, tuned_socket_factory
+from app.core.net_guard import PinnedResolver, Resolver, host_matches, is_ip_literal, tuned_socket_factory
+from app.extractors.ytdlp_runner import YtFormatSource, parse_cookie_header
 
 log = logging.getLogger(__name__)
 
 FXTWITTER_BASE = "https://api.fxtwitter.com"
 SYNDICATION_BASE = "https://cdn.syndication.twimg.com"
+TIKTOK_BASE = "https://www.tiktok.com"
 DEFAULT_USER_AGENT = "Mozilla/5.0 (compatible; telegram-media-downloader)"
+# Firefox desktop UA avoids TikTok's Chrome-JA3 SlardarWAF interstitial on plain aiohttp TLS.
+TIKTOK_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:132.0) Gecko/20100101 Firefox/132.0"
+TIKTOK_REFERER = "https://www.tiktok.com/"
+_TIKTOK_HOSTS = ("tiktok.com",)
+_TIKTOK_REDIRECTS = frozenset({301, 302})
+_TIKTOK_MAX_REDIRECTS = 2
+_MAX_TIKTOK_HTML_BYTES = 8_000_000
+_TIKTOK_POST_ID_RE = re.compile(r"^\d{6,25}$")
+_TIKTOK_REHYDRATION_RE = re.compile(
+    r'<script[^>]*\bid=["\']__UNIVERSAL_DATA_FOR_REHYDRATION__["\'][^>]*>(.*?)</script>',
+    re.IGNORECASE | re.DOTALL,
+)
+_SAFE_FMT_CHARS = re.compile(r"[^A-Za-z0-9_.]+")
 _B36 = "0123456789abcdefghijklmnopqrstuvwxyz"
 _VID_DIM_RE = re.compile(r"/vid/(?:avc1/)?(\d{2,4})x(\d{2,4})/")
 _SAFE_EXT = re.compile(r"^[a-z0-9]{1,8}$")
 _PHOTO_EXTS = frozenset({"jpg", "jpeg", "png", "webp"})
+_TIKTOK_PHOTO_EXTS = frozenset({"jpg", "jpeg", "png", "webp", "heic", "avif"})
 
 
 @dataclass(frozen=True)
@@ -64,6 +82,18 @@ class FastXResult:
     items: list[FastMediaItem] = field(default_factory=list)
     text_only: bool = False  # True only when the tweet was positively confirmed to have no media/card
     not_found: bool = False  # True only when both FxTwitter and Syndication returned HTTP 404
+
+
+@dataclass(frozen=True)
+class FastTikTokResult:
+    post_id: str
+    is_photo: bool
+    formats: list[FormatDescriptor] = field(default_factory=list)
+    sources: dict[str, YtFormatSource] = field(default_factory=dict)
+    width: int | None = None
+    height: int | None = None
+    duration: float | None = None
+    photos: list[FastMediaItem] = field(default_factory=list)
 
 
 def syndication_token(tweet_id: str) -> str:
@@ -334,6 +364,297 @@ def parse_syndication(data: Any, tweet_id: str, *, allow_http: bool = False) -> 
     return FastXResult(tweet_id=tweet_id, items=items, text_only=False)
 
 
+def _int_like(v: object) -> int | None:
+    if isinstance(v, bool):
+        return None
+    if isinstance(v, int):
+        return v if v > 0 else None
+    if isinstance(v, float) and v > 0:
+        return int(v)
+    if isinstance(v, str):
+        s = v.strip()
+        if s.isdigit():
+            n = int(s)
+            return n if n > 0 else None
+    return None
+
+
+def _float_like(v: object) -> float | None:
+    if isinstance(v, bool):
+        return None
+    if isinstance(v, int | float) and v > 0:
+        return float(v)
+    if isinstance(v, str):
+        try:
+            f = float(v.strip())
+        except ValueError:
+            return None
+        return f if (math.isfinite(f) and f > 0) else None
+    return None
+
+
+def _extract_cookie_header(set_cookies: Sequence[str]) -> str:
+    """Fold one or more HTTP `Set-Cookie` header values into a clean `Cookie` request header."""
+    jar: dict[str, str] = {}
+    for raw in set_cookies:
+        cleaned = parse_cookie_header(raw)
+        for part in cleaned.split("; "):
+            if "=" in part:
+                k, v = part.split("=", 1)
+                k = k.strip()
+                if k:
+                    jar[k] = v.strip()
+    return "; ".join(f"{k}={v}" for k, v in jar.items())
+
+
+def _tiktok_codec(raw_codec: object, gear_name: str = "") -> str | None:
+    c = str(raw_codec or "").strip().lower()
+    g = gear_name.strip().lower()
+    if "bytevc2" in c or "vvc" in c or "h266" in c or "bytevc2" in g:
+        return "bytevc2"
+    if any(tok in c for tok in ("hevc", "h265", "hvc", "bytevc1")) or "bytevc1" in g:
+        return "hevc"
+    if any(tok in c for tok in ("h264", "avc")):
+        return "h264"
+    return c or None
+
+
+def _tiktok_photo_ext(raw_url: str) -> str:
+    tail = urlsplit(raw_url).path.rsplit("/", 1)[-1]
+    if "." in tail:
+        cand = tail.rsplit(".", 1)[-1].lower()
+        if cand in _TIKTOK_PHOTO_EXTS:
+            return cand
+    return "jpeg"
+
+
+def _tiktok_media_headers(url: str, cookie_header: str) -> dict[str, str]:
+    headers = {"User-Agent": TIKTOK_USER_AGENT, "Referer": TIKTOK_REFERER}
+    # `/aweme/v1/play/` redirects to a cookie-free CDN host and returns 403 when web cookies are sent.
+    if cookie_header and "/aweme/v1/play/" not in urlsplit(url).path:
+        headers["Cookie"] = cookie_header
+    return headers
+
+
+def _safe_format_base(raw: str, fallback: str, used: set[str]) -> str:
+    base = _SAFE_FMT_CHARS.sub("_", raw).strip("_")[:54]
+    if not base or not base[0].isalnum():
+        base = fallback
+    cand = base
+    n = 1
+    while cand in used:
+        cand = f"{base}_{n}"
+        n += 1
+    used.add(cand)
+    return cand
+
+
+def _extract_url_list(val: Any) -> list[str]:
+    if isinstance(val, str) and val:
+        return [val]
+    if isinstance(val, dict):
+        raw = val.get("UrlList") or val.get("urlList")
+        if isinstance(raw, list):
+            return [u for u in raw if isinstance(u, str) and u]
+    return []
+
+
+def _tiktok_redirect_allowed(url: str, *, allow_http: bool, allowed_local_host: str | None = None) -> bool:
+    if not _url_allowed(url, allow_http=allow_http):
+        return False
+    parts = urlsplit(url)
+    host = (parts.hostname or "").lower().rstrip(".")
+    if not allow_http:
+        try:
+            if parts.port not in (None, 443):
+                return False
+        except ValueError:
+            return False
+        return host_matches(host, _TIKTOK_HOSTS)
+    return host_matches(host, _TIKTOK_HOSTS) or (allowed_local_host is not None and host == allowed_local_host)
+
+
+def parse_tiktok_rehydration(
+    data: Any,
+    post_id: str,
+    *,
+    cookie_header: str = "",
+    allow_http: bool = False,
+) -> FastTikTokResult | None:
+    """Parse TikTok's `__UNIVERSAL_DATA_FOR_REHYDRATION__` JSON for ONE exact post."""
+    if not isinstance(data, dict):
+        return None
+    scope = data.get("__DEFAULT_SCOPE__")
+    if not isinstance(scope, dict):
+        return None
+    detail = scope.get("webapp.video-detail")
+    if not isinstance(detail, dict):
+        return None
+    status_code = detail.get("statusCode")
+    if isinstance(status_code, bool) or (status_code is not None and status_code != 0):
+        return None  # deleted, private, geo-blocked, or unavailable -> let yt-dlp/gallery-dl classify
+    item_info = detail.get("itemInfo")
+    if not isinstance(item_info, dict):
+        return None
+    item = item_info.get("itemStruct")
+    if not isinstance(item, dict):
+        return None
+    if str(item.get("id") or "") != post_id:
+        return None
+    if item.get("privateItem") or item.get("secret"):
+        return None
+    author = item.get("author")
+    if isinstance(author, dict) and author.get("privateAccount"):
+        return None
+
+    # Photo-mode posts carry both `imagePost` and a dummy `video` dict; check `imagePost` first.
+    image_post = item.get("imagePost")
+    if isinstance(image_post, dict) and "images" in image_post:
+        raw_images = image_post.get("images")
+        if not isinstance(raw_images, list) or not raw_images:
+            return None
+        photos: list[FastMediaItem] = []
+        for idx, img in enumerate(raw_images, 1):
+            if not isinstance(img, dict):
+                return None
+            img_url = img.get("imageURL")
+            url_list = img_url.get("urlList") if isinstance(img_url, dict) else None
+            if not isinstance(url_list, list) or not url_list:
+                return None
+            raw_url = url_list[0]
+            if not isinstance(raw_url, str) or not _url_allowed(raw_url, allow_http=allow_http):
+                return None
+            ext = _tiktok_photo_ext(raw_url)
+            if not _SAFE_EXT.fullmatch(ext):
+                return None
+            photos.append(
+                FastMediaItem(
+                    num=idx,
+                    kind=ItemKind.PHOTO,
+                    source_item_id=f"{post_id}:{idx}",
+                    url=raw_url,
+                    extension=ext,
+                    width=_int_like(img.get("imageWidth")),
+                    height=_int_like(img.get("imageHeight")),
+                )
+            )
+        return FastTikTokResult(post_id=post_id, is_photo=True, photos=photos)
+
+    video = item.get("video")
+    if not isinstance(video, dict):
+        return None
+    v_width, v_height = _int_like(video.get("width")), _int_like(video.get("height"))
+    duration = _float_like(video.get("duration"))
+    formats: list[FormatDescriptor] = []
+    sources: dict[str, YtFormatSource] = {}
+    used_bases: set[str] = set()
+
+    raw_bi = video.get("bitrateInfo")
+    if isinstance(raw_bi, list):
+        for idx, entry in enumerate(raw_bi):
+            if not isinstance(entry, dict):
+                continue
+            play_addr = entry.get("PlayAddr") or entry.get("playAddr")
+            if not isinstance(play_addr, dict):
+                continue
+            url_list = play_addr.get("UrlList") or play_addr.get("urlList")
+            if not isinstance(url_list, list):
+                continue
+            gear = str(entry.get("GearName") or "").strip()
+            codec = _tiktok_codec(entry.get("CodecType") or video.get("codecType"), gear)
+            bitrate = _int_like(entry.get("Bitrate"))
+            tbr = round(bitrate / 1000.0, 3) if bitrate else None
+            w = _int_like(play_addr.get("Width")) or v_width
+            h = _int_like(play_addr.get("Height")) or v_height
+            size = _int_like(play_addr.get("DataSize"))
+            base = _safe_format_base(gear, f"{codec or 'vid'}_{h or 0}p_{idx}", used_bases)
+            for mirror_idx, raw_url in enumerate(url_list):
+                if mirror_idx > 99 or not isinstance(raw_url, str) or not _url_allowed(raw_url, allow_http=allow_http):
+                    continue
+                fid = f"{base}-{mirror_idx}"
+                formats.append(
+                    FormatDescriptor(
+                        format_id=fid,
+                        has_video=True,
+                        has_audio=True,
+                        width=w,
+                        height=h,
+                        vcodec=codec,
+                        acodec="aac",
+                        ext="mp4",
+                        tbr=tbr,
+                        filesize=size,
+                    )
+                )
+                sources[fid] = YtFormatSource(
+                    url=raw_url,
+                    protocol=urlsplit(raw_url).scheme.lower(),
+                    ext="mp4",
+                    headers=_tiktok_media_headers(raw_url, cookie_header),
+                )
+
+    if not formats:
+        v_codec = _tiktok_codec(video.get("codecType"))
+        v_br = _int_like(video.get("bitrate"))
+        v_tbr = round(v_br / 1000.0, 3) if v_br else None
+        for base_name, field_key, offset in (("play", "playAddr", 0), ("download", "downloadAddr", 10)):
+            for mirror_idx, raw_url in enumerate(_extract_url_list(video.get(field_key))):
+                if mirror_idx + offset > 99 or not _url_allowed(raw_url, allow_http=allow_http):
+                    continue
+                fid = f"{base_name}-{mirror_idx + offset}"
+                if fid in sources:
+                    continue
+                formats.append(
+                    FormatDescriptor(
+                        format_id=fid,
+                        has_video=True,
+                        has_audio=True,
+                        width=v_width,
+                        height=v_height,
+                        vcodec=v_codec,
+                        acodec="aac",
+                        ext="mp4",
+                        tbr=v_tbr,
+                    )
+                )
+                sources[fid] = YtFormatSource(
+                    url=raw_url,
+                    protocol=urlsplit(raw_url).scheme.lower(),
+                    ext="mp4",
+                    headers=_tiktok_media_headers(raw_url, cookie_header),
+                )
+
+    if not formats:
+        return None
+    return FastTikTokResult(
+        post_id=post_id,
+        is_photo=False,
+        formats=formats,
+        sources=sources,
+        width=v_width,
+        height=v_height,
+        duration=duration,
+    )
+
+
+def parse_tiktok_html(
+    html: str,
+    post_id: str,
+    *,
+    cookie_header: str = "",
+    allow_http: bool = False,
+) -> FastTikTokResult | None:
+    """Extract and parse `__UNIVERSAL_DATA_FOR_REHYDRATION__` JSON from a TikTok HTML page."""
+    match = _TIKTOK_REHYDRATION_RE.search(html)
+    if not match:
+        return None
+    try:
+        data = json.loads(match.group(1))
+    except ValueError:
+        return None
+    return parse_tiktok_rehydration(data, post_id, cookie_header=cookie_header, allow_http=allow_http)
+
+
 class FastApiClient:
     """Pooled async HTTP fast-path metadata client (keyless, SSRF-safe, zero-subprocess)."""
 
@@ -345,6 +666,7 @@ class FastApiClient:
         request_timeout: float = 5.0,
         fxtwitter_base: str = FXTWITTER_BASE,
         syndication_base: str = SYNDICATION_BASE,
+        tiktok_base: str = TIKTOK_BASE,
         allow_http: bool = False,
         connector_factory: Callable[[], aiohttp.BaseConnector] | None = None,
     ) -> None:
@@ -353,6 +675,7 @@ class FastApiClient:
         self._timeout = request_timeout
         self._fx_base = fxtwitter_base.rstrip("/")
         self._syn_base = syndication_base.rstrip("/")
+        self._tiktok_base = tiktok_base.rstrip("/")
         self._allow_http = allow_http
         self._connector_factory = connector_factory
         self._session: aiohttp.ClientSession | None = None
@@ -370,7 +693,12 @@ class FastApiClient:
                     keepalive_timeout=60.0,
                     socket_factory=tuned_socket_factory,
                 )
-            self._session = aiohttp.ClientSession(connector=connector, trust_env=False)
+            # Stateless DummyCookieJar prevents stale TikTok cookies leaking across independent requests.
+            self._session = aiohttp.ClientSession(
+                connector=connector,
+                trust_env=False,
+                cookie_jar=aiohttp.DummyCookieJar(),
+            )
         return self._session
 
     async def aclose(self) -> None:
@@ -422,4 +750,63 @@ class FastApiClient:
             return fx_res
         if fx_status == 404 and syn_status == 404:
             return FastXResult(tweet_id=tweet_id, items=[], not_found=True)
+        return None
+
+    async def discover_tiktok(self, post_id: str, deadline: Deadline) -> FastTikTokResult | None:
+        """Fetch TikTok web rehydration JSON in one GET; return `None` to fall back to yt-dlp/gallery-dl."""
+        if not _TIKTOK_POST_ID_RE.fullmatch(post_id):
+            return None
+        current = f"{self._tiktok_base}/@i/video/{post_id}"
+        local_host = (urlsplit(self._tiktok_base).hostname or "").lower().rstrip(".") if self._allow_http else None
+        req_headers = {
+            "User-Agent": TIKTOK_USER_AGENT,
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.9",
+        }
+        seen: set[str] = {current}
+        set_cookies: list[str] = []
+        for hops in range(_TIKTOK_MAX_REDIRECTS + 1):
+            deadline.check()
+            cap = min(self._timeout, deadline.remaining())
+            timeout = aiohttp.ClientTimeout(total=cap, sock_connect=min(3.0, cap), sock_read=cap)
+            try:
+                async with self._get_session().get(
+                    current,
+                    headers=req_headers,
+                    allow_redirects=False,
+                    proxy=self._proxy,
+                    timeout=timeout,
+                ) as resp:
+                    set_cookies.extend(resp.headers.getall("Set-Cookie", []))
+                    if resp.status in _TIKTOK_REDIRECTS:
+                        if hops >= _TIKTOK_MAX_REDIRECTS:
+                            return None
+                        loc = resp.headers.get("Location")
+                        if not loc:
+                            return None
+                        next_url = urljoin(current, loc)
+                        if next_url in seen or not _tiktok_redirect_allowed(
+                            next_url, allow_http=self._allow_http, allowed_local_host=local_host
+                        ):
+                            return None
+                        seen.add(next_url)
+                        current = next_url
+                        continue
+                    if resp.status != 200:
+                        return None
+                    buf = bytearray()
+                    async for chunk in resp.content.iter_chunked(65_536):
+                        buf.extend(chunk)
+                        if len(buf) > _MAX_TIKTOK_HTML_BYTES:
+                            return None
+                    html = buf.decode("utf-8", errors="replace")
+                    cookie_header = _extract_cookie_header(set_cookies)
+                    return parse_tiktok_html(html, post_id, cookie_header=cookie_header, allow_http=self._allow_http)
+            except aiohttp.ClientConnectorError as exc:
+                inner = exc.__cause__ or exc.__context__
+                if isinstance(inner, BotError):
+                    raise inner from None
+                return None
+            except (aiohttp.ClientError, TimeoutError, OSError, ValueError):
+                return None
         return None

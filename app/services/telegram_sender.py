@@ -111,7 +111,7 @@ class FdInputFile(InputFile):
     """Streams an already-validated file descriptor. Re-readable (positional reads), so a flood-wait
     retry can send the same file again without reopening any path."""
 
-    def __init__(self, fd: int, filename: str, size: int, chunk_size: int = 1 << 20) -> None:
+    def __init__(self, fd: int, filename: str, size: int, chunk_size: int = 64 << 10) -> None:
         super().__init__(filename=filename, chunk_size=chunk_size)
         self._fd = fd
         self._size = size
