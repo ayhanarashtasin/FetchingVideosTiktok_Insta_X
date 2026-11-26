@@ -123,6 +123,65 @@ Skip this section if you use the default single-process `WORKER_MODE=inprocess`.
 | `"egress denied"` in proxy logs | `egress_proxy` logs `host=` and `reason=` (not on allowlist, IP literal, private address, non-443 port). If a platform added a legitimate CDN host, confirm ownership, set `EGRESS_ALLOWED_SUFFIXES` to `DEFAULT_ALLOWED_SUFFIXES` (from `app/services/egress_proxy.py`) plus the new registrable suffix, and restart the proxy. Never use `*`, a TLD, or wide shared CDNs like `cloudfront.net`/`akamaized.net`. Private/loopback/metadata IPs are always refused. |
 | Worker cannot reach any platform | Check that `app.services.egress_proxy` is running on `127.0.0.1:3128` and matches `EGRESS_PROXY_URL`. |
 
+## Delivery takes minutes instead of seconds
+
+Every finished job logs one `job finished` line with the time spent in each stage. Read it before changing anything:
+
+| Field | Meaning |
+| --- | --- |
+| `resolve_s`, `discover_s` | Short-link hop and metadata lookup (FxTwitter, yt-dlp, gallery-dl) |
+| `fetch_s` | Download from the platform CDN + ffprobe + remux/transcode |
+| `extraction_s` | Everything before the final send, including a direct-URL attempt Telegram refused |
+| `telegram_s` | The send itself: the multipart **upload** to the Bot API (or Telegram fetching the URL when `direct_url=true`) |
+| `media_bytes` / `telegram_s` | Your real upload rate to Telegram |
+
+If `telegram_s` dominates, the bottleneck is the network path from this host to Telegram, not the bot. Measure it, and
+see what each link would need, with no token and nothing delivered:
+
+```bash
+uv run python scripts/latency_check.py --budget 4 <one or more public post links>
+```
+
+It uploads random bytes to `api.telegram.org` with a deliberately invalid token (Telegram reads the whole body, then
+answers 401), times the bot's real pipeline per link, and prints PASS/FAIL against the budget together with the
+upload rate each link needs.
+
+Use `--budget 4` for a 6 s stopwatch target. In the home measurement the stopwatch read 153.9 s against a job
+`duration_s` of 151.9 s. The extra ~2 s is Telegram handing the update to the bot and the client rendering the reply,
+which happen outside the bot.
+
+Reference measurement (owner's home PC on a residential connection, 2026-11-26):
+
+* Pipeline per link was 0.7-3.9 s (X 1080p 24.3 MB: 3.9 s). The CDN downloads ran at 65-74 Mbit/s.
+* Upload to `api.telegram.org` was **0.7-2.2 Mbit/s per connection**, against 51 Mbit/s to a nearby Cloudflare speed test
+  and 3.8 Mbit/s to a non-Telegram server in Amsterdam. Parallel connections each got the same rate, which points to a
+  per-flow limit on the route to Telegram.
+* Result: TikTok 4.5 MB took 42 s, Instagram 11.6 MB took 98 s, and X 1080p 24.3 MB took 152 s. In each case 95-97% of
+  that was `telegram_s`. A Bot API send is one HTTP request, so the bot cannot spread one file over several
+  connections.
+
+Fixes, in order of impact:
+
+1. **Run the bot where the upload to Telegram is fast.** Use a VPS with a good route to `api.telegram.org`.
+   * That endpoint resolved to 149.154.166.110, an address in Telegram's Amsterdam range. Its round-trip time matched
+     a known Amsterdam server, so it appears to be served from Amsterdam (inferred, not confirmed).
+   * A host in or near the Netherlands or Germany is therefore a sensible first candidate. Run `latency_check.py` there
+     **before** moving the bot.
+   * Projected budgets for a VPS are estimates until measured there, especially Telegram's own processing time.
+   * Both the CDN download and the upload then happen at datacenter speed.
+   * Your own link only carries the message and the stream you watch.
+   * Downloads from Telegram measured about 8 Mbit/s per connection on the same home PC, enough for 1080p playback.
+2. **Local Bot API server** on that VPS (`BOT_API_MODE=local`, [deploy guide section 6](deploy.md#6-hosted-vs-local-telegram-bot-api)).
+   It lifts the 50 MB cap to 2,000 MB, so HD videos above 49 MB are no longer swapped for a smaller variant.
+3. **`DIRECT_TELEGRAM_URL`** lets Telegram fetch public cookie-free CDN files itself: X videos ≤ 20 MB and photos ≤ 5 MB.
+   * The bot probes each file's real size first and skips this path for anything over Telegram's limit. Such a file
+     goes straight to download + upload, with no failed round trip first.
+   * On a slow uplink this path is the only fast one.
+   * On a fast VPS, compare `telegram_s` for `direct_url=true` and `false` jobs, and turn it off if uploading is quicker.
+
+Repeat requests for the same post are served from the Telegram `file_id` cache (`MEDIA_CACHE_TTL_SECONDS`). They take
+under 1 s anywhere, but they do not tell you anything about fresh-post latency.
+
 ## Collecting a safe report
 
 * **Linux VPS:**

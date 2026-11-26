@@ -29,7 +29,7 @@ def db(clock):
 
 def test_migrations_apply_once(clock):
     d = Database(":memory:", clock=clock)
-    assert d.migrate() == ["001_initial.sql"]
+    assert d.migrate() == ["001_initial.sql", "002_media_cache.sql"]
     assert d.migrate() == []  # idempotent
     d.close()
 

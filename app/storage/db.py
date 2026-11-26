@@ -13,6 +13,7 @@ import json
 import os
 import sqlite3
 import threading
+from collections import OrderedDict
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -24,6 +25,7 @@ from app.core.contracts import (
     ALLOWED_TRANSITIONS,
     TERMINAL_STATES,
     DeliveryMode,
+    ItemKind,
     JobRecord,
     JobState,
     Platform,
@@ -31,6 +33,7 @@ from app.core.contracts import (
 from app.core.errors import ErrorCode, IllegalTransitionError
 
 MIGRATIONS_DIR = Path(__file__).parent / "migrations"
+MEDIA_CACHE_MEM_LIMIT = 512
 
 
 def utcnow() -> datetime:
@@ -66,11 +69,32 @@ class DeliveryRow:
     error_code: str | None
 
 
+@dataclass(frozen=True)
+class CachedMediaItem:
+    position: int
+    kind: ItemKind
+    send_as: str  # "photo" | "video" | "document"
+    file_id: str
+    width: int | None = None
+    height: int | None = None
+    duration_seconds: float | None = None
+
+
+@dataclass(frozen=True)
+class CachedPost:
+    platform: Platform
+    post_id: str
+    delivery_mode: DeliveryMode
+    expected_count: int | None
+    items: list[CachedMediaItem]
+
+
 class Database:
     def __init__(self, path: Path | str, *, clock: Callable[[], datetime] = utcnow) -> None:
         self._path = str(path)
         self._clock = clock
         self._lock = threading.RLock()
+        self._media_mem: OrderedDict[tuple[str, str, str], tuple[CachedPost, str]] = OrderedDict()
         if self._path != ":memory:":
             parent = Path(self._path).parent
             parent.mkdir(parents=True, exist_ok=True)
@@ -389,7 +413,108 @@ class Database:
                 f"DELETE FROM jobs WHERE expires_at <= ? AND state IN ({placeholders})",
                 (now, *[s.value for s in TERMINAL_STATES]),
             )
+            with contextlib.suppress(sqlite3.OperationalError):
+                conn.execute("DELETE FROM media_cache WHERE expires_at <= ?", (now,))
+            expired_keys = [k for k, (_entry, exp) in self._media_mem.items() if exp <= now]
+            for k in expired_keys:
+                self._media_mem.pop(k, None)
         return PurgeResult(jobs=cur.rowcount, deliveries=deliveries)
+
+    # ------------------------------------------------------------------ media file_id cache
+    def get_media_cache(self, platform: Platform, post_id: str, delivery_mode: DeliveryMode) -> CachedPost | None:
+        key = (platform.value, post_id, delivery_mode.value)
+        now = iso(self._clock())
+        with self._lock:
+            mem = self._media_mem.get(key)
+            if mem is not None:
+                entry, expires_at = mem
+                if expires_at > now:
+                    self._media_mem.move_to_end(key)
+                    return entry
+                self._media_mem.pop(key, None)
+            try:
+                row = self._conn.execute(
+                    "SELECT expected_count, items_json, expires_at FROM media_cache "
+                    "WHERE platform = ? AND post_id = ? AND delivery_mode = ? AND expires_at > ?",
+                    (*key, now),
+                ).fetchone()
+            except sqlite3.OperationalError:
+                return None
+            if row is None:
+                return None
+            try:
+                raw_items = json.loads(row["items_json"])
+                items = [
+                    CachedMediaItem(
+                        position=int(i["position"]),
+                        kind=ItemKind(i["kind"]),
+                        send_as=str(i["send_as"]),
+                        file_id=str(i["file_id"]),
+                        width=i.get("width"),
+                        height=i.get("height"),
+                        duration_seconds=i.get("duration_seconds"),
+                    )
+                    for i in raw_items
+                ]
+            except (ValueError, KeyError, TypeError):
+                return None
+            if not items:
+                return None
+            entry = CachedPost(
+                platform=platform,
+                post_id=post_id,
+                delivery_mode=delivery_mode,
+                expected_count=row["expected_count"],
+                items=items,
+            )
+            self._media_mem[key] = (entry, row["expires_at"])
+            self._media_mem.move_to_end(key)
+            while len(self._media_mem) > MEDIA_CACHE_MEM_LIMIT:
+                self._media_mem.popitem(last=False)
+            return entry
+
+    def put_media_cache(self, entry: CachedPost, *, ttl_seconds: int) -> None:
+        if ttl_seconds <= 0 or not entry.items:
+            return
+        now_dt = self._clock()
+        now = iso(now_dt)
+        expires_at = iso(now_dt + timedelta(seconds=ttl_seconds))
+        payload = json.dumps(
+            [
+                {
+                    "position": i.position,
+                    "kind": i.kind.value,
+                    "send_as": i.send_as,
+                    "file_id": i.file_id,
+                    "width": i.width,
+                    "height": i.height,
+                    "duration_seconds": i.duration_seconds,
+                }
+                for i in entry.items
+            ]
+        )
+        key = (entry.platform.value, entry.post_id, entry.delivery_mode.value)
+        with self._tx() as conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO media_cache "
+                "(platform, post_id, delivery_mode, expected_count, items_json, created_at, expires_at) "
+                "VALUES (?,?,?,?,?,?,?)",
+                (*key, entry.expected_count, payload, now, expires_at),
+            )
+            self._media_mem[key] = (entry, expires_at)
+            self._media_mem.move_to_end(key)
+            while len(self._media_mem) > MEDIA_CACHE_MEM_LIMIT:
+                self._media_mem.popitem(last=False)
+
+    def delete_media_cache(self, platform: Platform, post_id: str, delivery_mode: DeliveryMode) -> None:
+        key = (platform.value, post_id, delivery_mode.value)
+        with self._tx() as conn:
+            with contextlib.suppress(sqlite3.OperationalError):
+                conn.execute(
+                    "DELETE FROM media_cache WHERE platform = ? AND post_id = ? AND delivery_mode = ?",
+                    key,
+                )
+            self._media_mem.pop(key, None)
 
     # ------------------------------------------------------------------ preferences
     def get_delivery_mode(self, owner_id: int, default: DeliveryMode) -> DeliveryMode:

@@ -10,6 +10,16 @@ workload). No inbound port is needed: the bot uses Telegram long polling. For ru
 
 ## 1. Linux VPS host preparation
 
+**Pick the location for speed first.**
+* The bot uploads every fresh video to Telegram, so that upload, not CPU, sets the send-to-delivered time.
+* `api.telegram.org` appears to be served from Amsterdam (inferred from its IP and round-trip time), so a host in or near
+  the Netherlands or Germany is a sensible first candidate.
+* Before deploying, clone the repo on the candidate and run `uv run python scripts/latency_check.py --budget 4 <links>`.
+  Use 4 s for a 6 s stopwatch target, which leaves about 2 s for Telegram and the client. It needs no token and sends
+  nothing.
+* See [troubleshooting: delivery takes minutes](troubleshooting.md#delivery-takes-minutes-instead-of-seconds) for
+  how to read it, and for the residential-connection numbers that motivated this check.
+
 Before putting a bot token on the server, harden the host:
 
 * SSH keys only (`PasswordAuthentication no`, `PermitRootLogin no`), a non-root sudo user (or let `ops/setup-ubuntu.sh`

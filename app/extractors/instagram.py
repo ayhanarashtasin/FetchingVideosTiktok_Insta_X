@@ -181,12 +181,14 @@ class InstagramAdapter:
             skipped_media_warning=warned,
             items=manifest_items(items),
         )
+        all_direct = bool(items) and all(i.url and i.scheme != "ytdl" for i in items)
         return Discovered(
             manifest,
             "gallerydl",
             nums={i.num - 1: i.num for i in items},
             schemes={i.num - 1: i.scheme for i in items},
             urls={i.num - 1: (i.url, i.extension) for i in items if i.url},
+            direct_telegram_ok=all_direct,
             hint="post",
         )
 

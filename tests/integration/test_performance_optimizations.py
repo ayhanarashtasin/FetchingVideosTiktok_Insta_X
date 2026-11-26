@@ -16,6 +16,7 @@ import hashlib
 import os
 import re
 import socket
+import sys
 import time
 import uuid
 
@@ -37,6 +38,7 @@ from app.core.net_guard import TCP_BUFFER_BYTES, tuned_socket_factory
 from app.core.url_validator import validate_url
 from app.extractors.base import FetchedItem, FetchOutcome
 from app.extractors.direct_download import (
+    RANGE_FIRST_BYTES,
     DirectDownloadUnavailable,
     DirectMediaDownloader,
     DirectTarget,
@@ -157,7 +159,7 @@ async def test_parallel_byte_range_download_is_bit_identical_and_concurrent(tmp_
         assert res == {1: dest}
         assert hashlib.sha256(dest.read_bytes()).hexdigest() == hashlib.sha256(blob).hexdigest()
         assert srv.max_in_flight >= 2, "remaining byte ranges must download concurrently"
-        assert srv.hits[0][1] == "bytes=0-1048575"
+        assert srv.hits[0][1] == f"bytes=0-{RANGE_FIRST_BYTES - 1}"
     finally:
         await dl.aclose()
         await srv.stop()
@@ -485,12 +487,17 @@ def test_tracking_session_tunes_sockets_and_sends_known_content_length(tmp_path)
     assert session._connector_init["socket_factory"] is tuned_socket_factory
 
     sock = tuned_socket_factory((socket.AF_INET, socket.SOCK_STREAM, 0))
+    plain = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     try:
         assert sock.getsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY) != 0
-        assert sock.getsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF) >= TCP_BUFFER_BYTES
-        assert sock.getsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF) >= TCP_BUFFER_BYTES
+        for opt in (socket.SO_SNDBUF, socket.SO_RCVBUF):
+            if sys.platform.startswith("linux"):  # left to kernel autotuning (an explicit size would lock it)
+                assert sock.getsockopt(socket.SOL_SOCKET, opt) == plain.getsockopt(socket.SOL_SOCKET, opt)
+            else:
+                assert sock.getsockopt(socket.SOL_SOCKET, opt) >= TCP_BUFFER_BYTES
     finally:
         sock.close()
+        plain.close()
 
     p = tmp_path / "clip.mp4"
     p.write_bytes(b"0123456789" * 100)
@@ -629,7 +636,7 @@ async def test_x_oversized_top_variant_falls_back_fast_to_next_variant_with_capt
         assert [c for c in fake.calls_to("yt_dlp") if "-f" in c] == []
         # 1080p was rejected on its very first Range header (never fetched remaining parallel slices).
         hits_1080 = [h for h in srv.hits if h[0] == "/1080p.mp4"]
-        assert all(rng == "bytes=0-1048575" for _, rng in hits_1080)
+        assert all(rng == f"bytes=0-{RANGE_FIRST_BYTES - 1}" for _, rng in hits_1080)
 
         plan = plan_delivery(result.assets, mode=DeliveryMode.MEDIA, caps=Caps(9_500_000, cap), url=x_url)
         assert plan.steps[0].caption == f"{x_url}\n120p"
@@ -1014,3 +1021,424 @@ async def test_direct_404_format_advances_immediately_without_ytdlp_retry_or_siz
     finally:
         await backend.aclose()
         await srv.stop()
+
+
+# ===================================================================================== TikTok cookie & mirror fixes
+def test_parse_cookie_header_strips_set_cookie_attributes():
+    from app.extractors.ytdlp_runner import parse_cookie_header, parse_info
+
+    raw = (
+        "ttwid=abc123; Domain=.tiktok.com; Path=/; Secure; Expires=Fri, 01 Jan 2027 00:00:00 GMT; "
+        "tt_csrf_token=tok_xyz; Domain=.tiktok.com; Path=/; Secure; "
+        "tt_chain_token=chn==; Domain=.tiktok.com; Path=/; HttpOnly"
+    )
+    cleaned = parse_cookie_header(raw)
+    assert "Domain=" not in cleaned and "Path=" not in cleaned and "Expires=" not in cleaned and "Secure" not in cleaned
+    assert "ttwid=abc123" in cleaned and "tt_csrf_token=tok_xyz" in cleaned and "tt_chain_token=chn==" in cleaned
+
+    info = parse_info(
+        '{"id":"1","formats":[{"format_id":"f0","url":"https://v16.tiktok.com/v.mp4","ext":"mp4",'
+        f'"vcodec":"h264","acodec":"aac","cookies":"{raw}"}}'
+        "]}"
+    )
+    assert info.entries[0].sources["f0"].headers["Cookie"] == cleaned
+
+
+def test_mirror_priority_prefers_primary_tiktok_mirror_0_over_backup_mirror_1():
+    from app.core.contracts import FormatDescriptor
+    from app.media.quality import ranked_choices
+
+    f0 = FormatDescriptor(
+        format_id="bytevc1_1080p_1780-0",
+        has_video=True,
+        has_audio=True,
+        width=1080,
+        height=1920,
+        vcodec="h265",
+        tbr=1780,
+    )
+    f1 = FormatDescriptor(
+        format_id="bytevc1_1080p_1780-1",
+        has_video=True,
+        has_audio=True,
+        width=1080,
+        height=1920,
+        vcodec="h265",
+        tbr=1780,
+    )
+    ordered = ranked_choices([f0, f1])
+    assert [c.selector for c in ordered] == ["bytevc1_1080p_1780-0", "bytevc1_1080p_1780-1"]
+
+
+@requires_ffmpeg
+async def test_in_process_ytdlp_discovers_loopback_media_and_enforces_allowlist(media_server, tmp_path):
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    y = YtDlpRunner(SubprocessRunner(), allowed_extractors=("generic",), in_process=True)
+    info = await y.discover(f"{media_server}/v_h264_aac.mp4", ws, Deadline(30))
+    assert (
+        len(info.entries) == 1 and info.entries[0].formats and info.info_json is not None and info.info_json.is_file()
+    )
+
+    strict = YtDlpRunner(SubprocessRunner(), in_process=True)  # production allowlist excludes generic
+    with pytest.raises(BotError) as exc:
+        await strict.discover(f"{media_server}/v_h264_aac.mp4", ws, Deadline(30))
+    assert exc.value.code is ErrorCode.UNSUPPORTED_POST
+
+
+# ===================================================================================== X FastApiClient (FxTwitter + Syndication)
+@requires_ffmpeg
+async def test_x_fast_api_fxtwitter_and_syndication_fallback_skip_gallerydl(tmp_path, media, make_settings):
+    import json as _json
+
+    from app.extractors.fast_api import FastApiClient, syndication_token
+
+    assert syndication_token("20")  # deterministic non-empty base36 token
+    video_bytes = media.mp4_h264_aac.read_bytes()
+    big_bytes = os.urandom(2_000_000)
+    jpg_bytes = media.jpg.read_bytes()
+    tid = "1700000000000000000"
+    x_url = f"https://x.com/someuser/status/{tid}"
+
+    routes: dict[str, tuple[int, dict]] = {}
+
+    async def api_handler(request: web.Request) -> web.Response:
+        path = request.path
+        if path in routes:
+            status, body = routes[path]
+            return web.Response(status=status, text=_json.dumps(body), content_type="application/json")
+        return web.Response(status=404, text="{}")
+
+    api_app = web.Application()
+    api_app.router.add_get("/{tail:.*}", api_handler)
+    api_runner = web.AppRunner(api_app)
+    await api_runner.setup()
+    api_site = web.TCPSite(api_runner, "127.0.0.1", 0)
+    await api_site.start()
+    api_port = api_site._server.sockets[0].getsockname()[1]  # type: ignore[union-attr]
+    api_base = f"http://127.0.0.1:{api_port}"
+
+    media_srv = await _MediaBenchServer(
+        {"/1080p.mp4": big_bytes, "/720p.mp4": video_bytes, "/pic.jpg": jpg_bytes}, support_range=True
+    ).start()
+    fast = FastApiClient(
+        fxtwitter_base=api_base,
+        syndication_base=api_base,
+        allow_http=True,
+        connector_factory=lambda: aiohttp.TCPConnector(socket_factory=tuned_socket_factory),
+    )
+    fake = FakeToolRunner()
+    backend = LocalExtractionBackend(
+        make_settings(hosted_file_max_bytes=1_000_000),
+        runner=fake,
+        downloader=_loopback_downloader(),
+        fast_api=fast,
+    )
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    try:
+        # 1. FxTwitter returns a video with 1080p (>cap) + 720p (<=cap) + quoted tweet media (must be ignored).
+        routes[f"/someuser/status/{tid}"] = (
+            200,
+            {
+                "code": 200,
+                "tweet": {
+                    "id": tid,
+                    "media": {
+                        "all": [
+                            {
+                                "type": "video",
+                                "url": f"{media_srv.base_url}/1080p.mp4",
+                                "width": 1920,
+                                "height": 1080,
+                                "duration": 5.0,
+                                "variants": [
+                                    {
+                                        "content_type": "video/mp4",
+                                        "bitrate": 2176000,
+                                        "url": f"{media_srv.base_url}/1080p.mp4",
+                                    },
+                                    {
+                                        "content_type": "video/mp4",
+                                        "bitrate": 832000,
+                                        "url": f"{media_srv.base_url}/720p.mp4",
+                                    },
+                                ],
+                            }
+                        ]
+                    },
+                    "quote": {
+                        "id": "999",
+                        "media": {"photos": [{"type": "photo", "url": f"{media_srv.base_url}/pic.jpg"}]},
+                    },
+                },
+            },
+        )
+        v = validate_url(x_url)
+        req = ExtractionRequest(
+            job_id=uuid.uuid4(),
+            owner_id=1,
+            chat_id=1,
+            origin_message_id=1,
+            original_url=x_url,
+            extraction_url=v.extraction_url,
+            platform=v.platform,
+            post_hint=v.post_hint,
+        )
+        m1 = await backend.discover(req, ws, Deadline(30))
+        r1 = await backend.fetch(req, m1, ws, Deadline(30))
+        assert len(r1.assets) == 1 and r1.assets[0].local_path.read_bytes() == video_bytes
+        assert r1.assets[0].quality_note and "exceeded" in r1.assets[0].quality_note
+        assert fake.calls_to("gallery_dl") == [] and fake.calls_to("yt_dlp") == [], (
+            "fast_api path must skip gallery-dl and yt-dlp completely"
+        )
+
+        # 2. FxTwitter 500 -> falls back to X Syndication cleanly and extracts photo.
+        routes[f"/someuser/status/{tid}"] = (500, {})
+        routes["/tweet-result"] = (
+            200,
+            {
+                "id_str": tid,
+                "mediaDetails": [
+                    {
+                        "type": "photo",
+                        "media_url_https": f"{media_srv.base_url}/pic.jpg",
+                        "original_info": {"width": 320, "height": 240},
+                    }
+                ],
+            },
+        )
+        req2 = req.model_copy(update={"job_id": uuid.uuid4()})
+        m2 = await backend.discover(req2, ws, Deadline(30))
+        r2 = await backend.fetch(req2, m2, ws, Deadline(30))
+        assert len(r2.assets) == 1 and r2.assets[0].local_path.read_bytes() == jpg_bytes
+        assert fake.calls_to("gallery_dl") == [] and fake.calls_to("yt_dlp") == []
+    finally:
+        await backend.aclose()
+        await media_srv.stop()
+        await api_runner.cleanup()
+
+
+# ===================================================================================== Pre-extraction media_cache & Direct URL send
+async def test_media_cache_hit_skips_extraction_and_stale_file_id_self_heals(tmp_path, media):
+    from tests.e2e import start_e2e
+
+    e = await start_e2e(tmp_path)
+    try:
+        ig_url = "https://www.instagram.com/p/ABCdef12345/"
+        e.tools.gd_dump(ig_url, "gd_instagram_photo")
+        e.tools.gd_files(ig_url, {1: media.jpg})
+
+        # 1st send populates media_cache.
+        await e.say(f"{ig_url}?utm=1", message_id=1)
+        await e.idle()
+        assert len(e.tools.calls_to("gallery_dl")) == 2
+        first_fid = e.server.calls_of("sendPhoto")[0].reply["photo"][-1]["file_id"]
+
+        # 2nd send (different query string!) hits media_cache with ZERO gallery-dl calls.
+        await e.say(f"{ig_url}?utm=2", message_id=2)
+        await e.server.wait_for(lambda: len(e.server.calls_of("sendPhoto")) == 2)
+        await e.idle()
+        assert len(e.tools.calls_to("gallery_dl")) == 2
+        second = e.server.calls_of("sendPhoto")[1]
+        assert second.fields["photo"] == first_fid and not second.files
+        assert second.fields["caption"] == f"{ig_url}\n240p"
+
+        # 3rd send: Telegram rejects the stale cached file_id (400) -> evicts cache & extracts fresh!
+        e.server.fail("sendPhoto", 400, "Bad Request: wrong file identifier", times=1)
+        await e.say(f"{ig_url}?utm=3", message_id=3)
+        await e.server.wait_for(lambda: len(e.server.calls_of("sendPhoto")) == 4)
+        await e.idle()
+        assert len(e.tools.calls_to("gallery_dl")) == 4  # re-extracted cleanly
+        assert e.server.calls_of("sendPhoto")[-1].files  # uploaded fresh bytes
+    finally:
+        await e.stop()
+
+
+@requires_ffmpeg
+async def test_direct_telegram_url_delivery_skips_download_and_falls_back_on_400(tmp_path, media):
+    from tests.e2e import start_e2e
+
+    x_url = "https://x.com/someuser/status/1700000000000000000"
+    e = await start_e2e(tmp_path, media_cache_ttl_seconds=0)
+    try:
+        # Turn on direct URL fast-send on this test's LocalExtractionBackend.
+        e.backend._direct_telegram_url = True  # type: ignore[attr-defined]
+        e.tools.gd_dump(x_url, "gd_twitter_video")
+        e.tools.gd_files(x_url, {1: media.mp4_h264_aac})
+
+        # 1. Direct URL succeeds: Telegram receives the HTTPS CDN URL directly (no download subprocess, no file upload!).
+        await e.say(x_url, message_id=1)
+        await e.idle()
+        assert len(e.tools.calls_to("gallery_dl")) == 1  # discover only, NO download!
+        v1 = e.server.calls_of("sendVideo")[0]
+        assert v1.fields["video"].startswith("https://") and not v1.files
+        assert e.jobs()[0]["state"] == "COMPLETED"
+
+        # 2. Force Telegram 400 on direct URL -> falls back atomically to local download+upload!
+        e.server.fail("sendVideo", 400, "Bad Request: failed to get HTTP URL content", times=1)
+        await e.say(x_url, message_id=2)
+        await e.server.wait_for(lambda: len(e.server.calls_of("sendVideo")) == 3)
+        await e.idle()
+        assert len(e.tools.calls_to("gallery_dl")) == 3  # 1st discover + 2nd discover + 2nd download fallback
+        v_fb = e.server.calls_of("sendVideo")[-1]
+        assert v_fb.files and next(iter(v_fb.files.values()))[1] == media.mp4_h264_aac.read_bytes()
+
+        # 3. Ambiguous 500 on direct URL -> DELIVERY_UNKNOWN, NO fallback replay!
+        e.server.fail("sendVideo", 500, "Internal Server Error", times=10)
+        await e.say(x_url, message_id=3)
+        await e.idle()
+        assert e.jobs()[-1]["state"] == "DELIVERY_UNKNOWN"
+        assert len(e.tools.calls_to("gallery_dl")) == 4  # discover only; download fallback MUST NOT run!
+    finally:
+        await e.stop()
+
+
+class _SizedStubDownloader:
+    """Stands in for DirectMediaDownloader without any network: `probe_size` reports a fixed CDN size (or
+    raises), and direct downloads are refused so `fetch()` falls back to the (fake) extractor tool."""
+
+    def __init__(self, size: int | BaseException | None) -> None:
+        self.size = size
+        self.probed: list[str] = []
+
+    async def probe_size(self, url, deadline, *, headers=None, timeout=3.0):
+        self.probed.append(url)
+        if isinstance(self.size, BaseException):
+            raise self.size
+        return self.size
+
+    async def download_many(self, targets, workspace, deadline, *, max_file_bytes=None):
+        raise DirectDownloadUnavailable("stub: direct downloads disabled")
+
+    async def aclose(self) -> None:
+        return None
+
+
+async def test_probe_size_reads_total_from_one_byte_range_without_downloading(tmp_path):
+    blob = os.urandom(3_000_000)
+    srv = await _MediaBenchServer({"/big.mp4": blob}, support_range=True).start()
+    plain = await _MediaBenchServer({"/big.mp4": blob}, support_range=False).start()
+    slow = await _MediaBenchServer({"/big.mp4": blob}, delay=2.0).start()
+    srv.redirects["/hop.mp4"] = "/big.mp4"
+    dl = _loopback_downloader()
+    try:
+        assert await dl.probe_size(f"{srv.base_url}/big.mp4", Deadline(10)) == len(blob)
+        assert srv.hits == [("/big.mp4", "bytes=0-0")], "one 1-byte request, never the body"
+        assert await dl.probe_size(f"{srv.base_url}/hop.mp4", Deadline(10)) == len(blob)  # validated redirect
+        assert await dl.probe_size(f"{plain.base_url}/big.mp4", Deadline(10)) == len(blob)  # 200 + Content-Length
+        assert await dl.probe_size(f"{srv.base_url}/missing.mp4", Deadline(10)) is None  # unknown, not "small"
+        t0 = time.monotonic()
+        assert await dl.probe_size(f"{slow.base_url}/big.mp4", Deadline(10), timeout=0.2) is None
+        assert time.monotonic() - t0 < 1.5, "a slow CDN must not hold the job up"
+    finally:
+        await dl.aclose()
+        await srv.stop()
+        await plain.stop()
+        await slow.stop()
+
+
+async def test_direct_url_candidates_skip_url_send_over_telegram_fetch_limit(make_settings):
+    from app.core.contracts import Access, ItemDescriptor, Platform, PostType
+    from app.extractors.base import Discovered
+
+    async def candidates(size: int | BaseException | None, kind: ItemKind = ItemKind.VIDEO, ext: str = "mp4"):
+        stub = _SizedStubDownloader(size)
+        backend = LocalExtractionBackend(
+            make_settings(), runner=FakeToolRunner(), downloader=stub, enable_direct_telegram_url=True
+        )
+        try:
+            job_id = uuid.uuid4()
+            manifest = PostManifest(
+                platform=Platform.X,
+                post_id="1700000000000000000",
+                post_type=PostType.VIDEO if kind is ItemKind.VIDEO else PostType.PHOTO,
+                access=Access.PERMITTED_PUBLIC,
+                expected_count=1,
+                count_verified=True,
+                items=[ItemDescriptor(source_item_id="1:1", position=0, kind=kind, width=1920, height=1080)],
+            )
+            cdn = f"https://video.twimg.com/ext_tw_video/1/pu/vid/1920x1080/a.{ext}"
+            cache = backend.adapters[Platform.X].cache  # type: ignore[attr-defined]
+            cache.put(
+                job_id, Discovered(manifest, "fast_api", nums={0: 1}, urls={0: (cdn, ext)}, direct_telegram_ok=True)
+            )
+            out = await backend.direct_url_candidates(job_id, manifest, Deadline(5))
+            assert cache.peek(job_id) is not None, "the fallback fetch() must still find the discovery"
+            assert stub.probed == [cdn]
+            return out
+        finally:
+            await backend.aclose()
+
+    # The real 1080p X video from the latency investigation (24,337,627 bytes): Telegram cannot fetch it.
+    assert await candidates(24_337_627) is None
+    at_limit = await candidates(20_000_000)
+    assert at_limit is not None and at_limit[0].size_bytes == 20_000_000
+    small = await candidates(1_200_000)
+    assert small is not None and small[0].size_bytes == 1_200_000
+    unknown = await candidates(None)  # CDN did not say: keep the URL attempt (Telegram decides, as before)
+    assert unknown is not None and unknown[0].size_bytes is None
+    assert await candidates(BotError(ErrorCode.INVALID_URL, "private", reason="unsafe_destination")) is None
+    assert await candidates(6_000_000, kind=ItemKind.PHOTO, ext="jpg") is None  # photo ceiling is 5 MB
+
+
+@requires_ffmpeg
+async def test_e2e_oversized_video_skips_doomed_url_attempt_and_small_one_still_uses_it(tmp_path, media):
+    from tests.e2e import start_e2e
+
+    x_url = "https://x.com/someuser/status/1700000000000000000"
+    stub = _SizedStubDownloader(24_337_627)
+
+    async def factory(settings, tools):
+        return LocalExtractionBackend(settings, runner=tools, downloader=stub, enable_direct_telegram_url=True)
+
+    e = await start_e2e(tmp_path, media_cache_ttl_seconds=0, extractor_factory=factory)
+    try:
+        e.tools.gd_dump(x_url, "gd_twitter_video")
+        e.tools.gd_files(x_url, {1: media.mp4_h264_aac})
+
+        # Over 20 MB: exactly ONE sendVideo, and it is the multipart upload (no URL attempt first).
+        await e.say(x_url, message_id=1)
+        await e.idle()
+        sends = e.server.calls_of("sendVideo")
+        assert len(sends) == 1 and sends[0].files
+        assert e.jobs()[-1]["state"] == "COMPLETED"
+
+        # Under 20 MB: Telegram still fetches the CDN URL itself (no download, no upload).
+        stub.size = 1_200_000
+        await e.say(x_url, message_id=2)
+        await e.server.wait_for(lambda: len(e.server.calls_of("sendVideo")) == 2)
+        await e.idle()
+        second = e.server.calls_of("sendVideo")[1]
+        assert second.fields["video"].startswith("https://") and not second.files
+        assert stub.probed == ["https://pbs.example.invalid/1.mp4"] * 2
+    finally:
+        await e.stop()
+
+
+def test_media_cache_ttl_expiry_and_purge(tmp_path):
+    from app.core.contracts import DeliveryMode, Platform
+    from app.storage.db import CachedMediaItem, CachedPost, Database
+    from tests.helpers import Clock
+
+    clk = Clock()
+    db = Database(":memory:", clock=clk)
+    try:
+        db.migrate()
+        entry = CachedPost(
+            platform=Platform.X,
+            post_id="12345",
+            delivery_mode=DeliveryMode.MEDIA,
+            expected_count=1,
+            items=[CachedMediaItem(0, ItemKind.VIDEO, "video", "fid-1", 1280, 720, 5.0)],
+        )
+        db.put_media_cache(entry, ttl_seconds=60)
+        assert db.get_media_cache(Platform.X, "12345", DeliveryMode.MEDIA) == entry
+        assert db.get_media_cache(Platform.X, "12345", DeliveryMode.ORIGINAL) is None
+
+        clk.advance(seconds=61)
+        assert db.get_media_cache(Platform.X, "12345", DeliveryMode.MEDIA) is None
+        db.purge_expired()
+        assert db._conn.execute("SELECT COUNT(*) FROM media_cache").fetchone()[0] == 0
+    finally:
+        db.close()

@@ -15,7 +15,9 @@ import os
 import re
 import sys
 from dataclasses import dataclass, field
+from http.cookies import CookieError, SimpleCookie
 from pathlib import Path
+from typing import Any
 
 from app.core.contracts import FormatDescriptor
 from app.core.deadline import Deadline
@@ -94,6 +96,30 @@ def _format(raw: dict) -> FormatDescriptor | None:
     )
 
 
+_COOKIE_ATTRS = frozenset({"path", "domain", "expires", "max-age", "secure", "httponly", "samesite", "priority"})
+
+
+def parse_cookie_header(raw: str) -> str:
+    """Convert yt-dlp's Set-Cookie serialized `cookies` field into a clean HTTP `Cookie` header."""
+    text = raw.strip()
+    if not text:
+        return ""
+    jar = SimpleCookie()
+    try:
+        jar.load(text)
+    except CookieError:
+        jar = SimpleCookie()
+    if jar:
+        return "; ".join(f"{name}={morsel.value}" for name, morsel in jar.items())
+    # Fallback for non-standard cookie strings: drop Set-Cookie metadata attributes.
+    pairs = [
+        part.strip()
+        for part in text.split(";")
+        if "=" in part and part.strip().split("=", 1)[0].strip().lower() not in _COOKIE_ATTRS
+    ]
+    return "; ".join(pairs)
+
+
 def _source(raw: dict, fallback_headers: dict[str, str]) -> YtFormatSource | None:
     url = raw.get("url")
     if not isinstance(url, str) or not url:
@@ -106,7 +132,9 @@ def _source(raw: dict, fallback_headers: dict[str, str]) -> YtFormatSource | Non
                 headers[k] = v
     cookies = raw.get("cookies")
     if isinstance(cookies, str) and cookies.strip():
-        headers["Cookie"] = cookies.strip()
+        clean_cookie = parse_cookie_header(cookies)
+        if clean_cookie:
+            headers["Cookie"] = clean_cookie
     proto = raw.get("protocol")
     ext = raw.get("ext")
     return YtFormatSource(
@@ -135,7 +163,9 @@ def parse_info(stdout: str) -> YtInfo:
         if isinstance(e.get("http_headers"), dict):
             entry_headers = {k: v for k, v in e["http_headers"].items() if isinstance(k, str) and isinstance(v, str)}
         if isinstance(e.get("cookies"), str) and e["cookies"].strip():
-            entry_headers.setdefault("Cookie", e["cookies"].strip())
+            clean_cookie = parse_cookie_header(e["cookies"])
+            if clean_cookie:
+                entry_headers.setdefault("Cookie", clean_cookie)
         formats: list[FormatDescriptor] = []
         sources: dict[str, YtFormatSource] = {}
         for r in e.get("formats") or []:
@@ -171,6 +201,43 @@ def parse_info(stdout: str) -> YtInfo:
     return YtInfo(entries=entries, is_playlist=is_playlist)
 
 
+class _CaptureLogger:
+    """Captures yt-dlp error lines for classification without printing to stderr."""
+
+    def __init__(self) -> None:
+        self.errors: list[str] = []
+
+    def debug(self, msg: str) -> None:
+        return None
+
+    def warning(self, msg: str) -> None:
+        return None
+
+    def error(self, msg: str) -> None:
+        self.errors.append(msg)
+
+
+def _ytdlp_extractor_classes(allowed: tuple[str, ...]) -> list[type[Any]] | None:
+    """Resolve exact extractor classes without scanning yt-dlp's 1,800+ lazy extractors (~0.9s saved)."""
+    mapping: dict[str, tuple[str, str]] = {
+        "tiktok": ("yt_dlp.extractor.tiktok", "TikTokIE"),
+        "instagram": ("yt_dlp.extractor.instagram", "InstagramIE"),
+        "instagram:story": ("yt_dlp.extractor.instagram", "InstagramStoryIE"),
+        "twitter": ("yt_dlp.extractor.twitter", "TwitterIE"),
+        "generic": ("yt_dlp.extractor.generic", "GenericIE"),
+    }
+    if not allowed or any(name not in mapping for name in allowed):
+        return None
+    import importlib
+
+    classes: list[type[Any]] = []
+    for name in allowed:
+        mod_name, cls_name = mapping[name]
+        mod = importlib.import_module(mod_name)
+        classes.append(getattr(mod, cls_name))
+    return classes
+
+
 class YtDlpRunner:
     def __init__(
         self,
@@ -185,6 +252,7 @@ class YtDlpRunner:
         max_file_bytes: int = 4_000_000_000,
         min_free_bytes: int = 0,
         step_timeout: float = 90.0,
+        in_process: bool = False,
     ) -> None:
         self._runner = runner
         self._python = python or sys.executable
@@ -196,6 +264,7 @@ class YtDlpRunner:
         self._max_file_bytes = max_file_bytes
         self._min_free = min_free_bytes
         self._step_timeout = step_timeout
+        self._in_process = in_process
 
     def _home(self, workspace: Path) -> Path:
         home = workspace / ".home"
@@ -231,6 +300,72 @@ class YtDlpRunner:
             args += ["--cookies", str(cookies)]  # a private per-job copy (yt-dlp saves its jar on exit)
         return args
 
+    async def _discover_in_process(
+        self,
+        url: str,
+        cookies: Path | None,
+        deadline: Deadline,
+        *,
+        hint: str | None,
+        session_supported: bool,
+    ) -> str:
+        """Run yt-dlp metadata extraction in a worker thread (avoids ~0.4-1.5s subprocess boot)."""
+        from yt_dlp import YoutubeDL
+        from yt_dlp.utils import YoutubeDLError
+
+        logger = _CaptureLogger()
+        opts: dict[str, Any] = {
+            "ignoreconfig": True,
+            "noplaylist": True,
+            "cachedir": False,
+            "quiet": True,
+            "no_warnings": True,
+            "noprogress": True,
+            "allowed_extractors": list(self._allowed),
+            "socket_timeout": self._socket_timeout,
+            "retries": 1,
+            "extractor_retries": 1,
+            "check_formats": False,
+            "playlist_items": f"1:{self._max_items}",
+            "logger": logger,
+        }
+        if self._proxy:
+            opts["proxy"] = self._proxy
+        if cookies is not None:
+            opts["cookiefile"] = str(cookies)
+
+        def _extract() -> str:
+            classes = _ytdlp_extractor_classes(self._allowed)
+            if classes is not None:
+                with YoutubeDL(opts, auto_init=False) as ydl:
+                    for cls in classes:
+                        ydl.add_info_extractor(cls())
+                    raw = ydl.extract_info(url, download=False)
+                    if raw is None:
+                        raise BotError(ErrorCode.NOT_FOUND_OR_EXPIRED, "yt-dlp returned no information")
+                    clean = ydl.sanitize_info(raw)
+                    return json.dumps(clean, ensure_ascii=False)
+            with YoutubeDL(opts) as ydl:
+                raw = ydl.extract_info(url, download=False)
+                if raw is None:
+                    raise BotError(ErrorCode.NOT_FOUND_OR_EXPIRED, "yt-dlp returned no information")
+                clean = ydl.sanitize_info(raw)
+                return json.dumps(clean, ensure_ascii=False)
+
+        timeout = deadline.cap(self._step_timeout)
+        try:
+            raw_json = await asyncio.wait_for(asyncio.to_thread(_extract), timeout=timeout)
+        except TimeoutError:
+            raise BotError(ErrorCode.DOWNLOAD_TIMEOUT, "yt-dlp discovery timed out") from None
+        except BotError:
+            raise
+        except YoutubeDLError as exc:
+            msg = "\n".join(logger.errors) or str(exc)
+            raise classify_ytdlp(msg, 1, session_supported=session_supported, hint=hint) from None
+        if len(raw_json.encode("utf-8")) > MAX_JSON_BYTES:
+            raise BotError(ErrorCode.LIMIT_EXCEEDED, "yt-dlp metadata too large")
+        return raw_json
+
     async def discover(
         self,
         url: str,
@@ -241,29 +376,35 @@ class YtDlpRunner:
         hint: str | None = None,
         session_supported: bool = False,
     ) -> YtInfo:
-        args = [
-            *self._base(cookies=self._session(workspace, use_cookies)),
-            "--playlist-items",
-            f"1:{self._max_items}",
-            "--no-check-formats",
-            "-J",
-            "--",
-            url,
-        ]
-        res = await self._runner.run(
-            args,
-            cwd=workspace,
-            env=sanitized_env(self._home(workspace), proxy=self._proxy),
-            timeout=deadline.cap(self._step_timeout),
-            max_stdout=MAX_JSON_BYTES,
-        )
-        if res.timed_out:
-            raise BotError(ErrorCode.DOWNLOAD_TIMEOUT, "yt-dlp discovery timed out")
-        if res.stdout_truncated:
-            raise BotError(ErrorCode.LIMIT_EXCEEDED, "yt-dlp metadata too large")
-        if res.returncode != 0:
-            raise classify_ytdlp(res.stderr_text(), res.returncode, session_supported=session_supported, hint=hint)
-        raw_json = res.stdout_text()
+        cookies = self._session(workspace, use_cookies)
+        if self._in_process:
+            raw_json = await self._discover_in_process(
+                url, cookies, deadline, hint=hint, session_supported=session_supported
+            )
+        else:
+            args = [
+                *self._base(cookies=cookies),
+                "--playlist-items",
+                f"1:{self._max_items}",
+                "--no-check-formats",
+                "-J",
+                "--",
+                url,
+            ]
+            res = await self._runner.run(
+                args,
+                cwd=workspace,
+                env=sanitized_env(self._home(workspace), proxy=self._proxy),
+                timeout=deadline.cap(self._step_timeout),
+                max_stdout=MAX_JSON_BYTES,
+            )
+            if res.timed_out:
+                raise BotError(ErrorCode.DOWNLOAD_TIMEOUT, "yt-dlp discovery timed out")
+            if res.stdout_truncated:
+                raise BotError(ErrorCode.LIMIT_EXCEEDED, "yt-dlp metadata too large")
+            if res.returncode != 0:
+                raise classify_ytdlp(res.stderr_text(), res.returncode, session_supported=session_supported, hint=hint)
+            raw_json = res.stdout_text()
         info = parse_info(raw_json)
         if not info.entries:
             raise BotError(ErrorCode.NOT_FOUND_OR_EXPIRED, "yt-dlp found no entries")
