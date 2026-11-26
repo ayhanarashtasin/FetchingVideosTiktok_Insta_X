@@ -140,11 +140,17 @@ see what each link would need, with no token and nothing delivered:
 
 ```bash
 uv run python scripts/latency_check.py --budget 4 <one or more public post links>
+# Benchmark a running local telegram-bot-api server (uses LOCAL_BOT_API_URL from .env):
+uv run python scripts/latency_check.py --local --budget 4 <one or more public post links>
+# Quick RTT-only VPS region check (skips upload and link downloads):
+uv run python scripts/latency_check.py --upload-mb 0
 ```
 
-It uploads random bytes to `api.telegram.org` with a deliberately invalid token (Telegram reads the whole body, then
-answers 401), times the bot's real pipeline per link, and prints PASS/FAIL against the budget together with the
-upload rate each link needs.
+At startup it runs a concurrent TCP 443 RTT probe to both `api.telegram.org` (Amsterdam) and DC5 (`91.108.56.130`,
+Singapore) and prints a 1-line VPS pairing recommendation (`Singapore + BOT_API_MODE=local` vs `EU/AMS + hosted API`).
+It then uploads random bytes to `api.telegram.org` (or `LOCAL_BOT_API_URL` with `--local`, or any custom `--api-url`)
+with a deliberately invalid token (the server reads the whole body, then answers 401), times the bot's real pipeline per
+link, and prints PASS/FAIL against the budget together with the upload rate each link needs.
 
 Use `--budget 4` for a 6 s stopwatch target. In the home measurement the stopwatch read 153.9 s against a job
 `duration_s` of 151.9 s. The extra ~2 s is Telegram handing the update to the bot and the client rendering the reply,
@@ -177,7 +183,9 @@ Fixes, in order of impact:
    * This bot's uploaded files are stored on **DC5 (Singapore)**. That comes from the cached `file_id`s: base64url
      decode, expand runs of `0x00`, and read the second little-endian int32. Files Telegram fetched by URL showed DC4.
    * Measured 2026-11-26 from four Singapore datacenters (Globalping, TCP 443, 0% loss): ~158 ms to `api.telegram.org`
-     but ~2 ms to DC5 (`91.108.56.130`). A Singapore VPS therefore pairs best with the local server.
+     but ~2 ms to DC5 (`91.108.56.130`). A Singapore VPS therefore pairs best with `BOT_API_MODE=local` (via quick Docker
+     `aiogram/telegram-bot-api` on `127.0.0.1:8081` or the native C++ `systemd` build), whereas an EU VPS should stay on
+     `BOT_API_MODE=hosted` — **never** pair an EU VPS with `BOT_API_MODE=local` (~158 ms EU <-> SG).
    It lifts the 50 MB cap to 2,000 MB, so HD videos above 49 MB are no longer swapped for a smaller variant.
 3. **`DIRECT_TELEGRAM_URL`** lets Telegram fetch public cookie-free CDN files itself: X videos ≤ 20 MB and photos ≤ 5 MB.
    * The bot probes each file's real size first and skips this path for anything over Telegram's limit. Such a file

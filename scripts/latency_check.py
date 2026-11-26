@@ -3,17 +3,22 @@
 
     uv run python scripts/latency_check.py <link> [<link> ...]
     uv run python scripts/latency_check.py --budget 4 --upload-mb 8 https://x.com/<user>/status/<id>
+    uv run python scripts/latency_check.py --local --budget 4 https://x.com/<user>/status/<id>
 
 Run it on the machine that runs the bot today AND on any VPS you are considering, before moving the bot.
 Budget tip: the bot's `duration_s` excludes Telegram handing the update to the bot and the client showing the
 reply (~2 s on the 2026-11-26 home measurement), so `--budget 4` approximates a 6 s stopwatch target.
-It measures the two things that decide the answer, without delivering anything to anyone:
+It measures three things that decide the answer, without delivering anything to anyone:
 
-1. Upload throughput to api.telegram.org through the bot's own aiohttp stack (tuned 1 MiB socket buffers).
+1. Concurrent TCP 443 RTT to `api.telegram.org` (Amsterdam) and Telegram DC5 (`91.108.56.130`, Singapore —
+   this bot's home DC) with a 1-line VPS pairing recommendation (`Singapore + BOT_API_MODE=local` vs
+   `EU/AMS + hosted API`).
+2. Upload throughput to the Bot API (`https://api.telegram.org` by default, `--local` for
+   `Settings().local_bot_api_url`, or `--api-url <url>`) through the bot's own aiohttp stack.
    `--upload-mb` of random bytes are POSTed as a multipart `sendDocument` with a deliberately INVALID token:
    Telegram reads the whole body before it answers 401, so the timing is the real upload path. The bot token
-   is never used or sent (`.env` is only loaded for the extractor settings); nothing is sent to any chat.
-2. The bot's real extraction pipeline per link (short-link resolve, discover, CDN size probe, download +
+   is never used or sent (`.env` is only loaded for extractor/local-URL settings); nothing is sent to any chat.
+3. The bot's real extraction pipeline per link (short-link resolve, discover, CDN size probe, download +
    ffprobe + prepare) in a throw-away directory. Telegram is not contacted.
 
 Per link it prints: pipeline time + size / measured upload rate + `--telegram-overhead` (an ASSUMPTION for
@@ -26,7 +31,9 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import os
+import socket
 import sys
 import tempfile
 import time
@@ -47,6 +54,8 @@ from app.core.url_validator import UrlKind, parse_message_url  # noqa: E402
 from app.extractors.local import LocalExtractionBackend  # noqa: E402
 
 TELEGRAM_API = "https://api.telegram.org"
+TELEGRAM_AMS_HOST = "api.telegram.org"
+TELEGRAM_DC5_HOST = "91.108.56.130"  # Telegram DC5 (Singapore — this bot's home DC)
 INVALID_TOKEN = "000000:" + "A" * 35  # can never be a real bot: Telegram reads the body, then answers 401
 
 
@@ -55,7 +64,7 @@ class UploadProbe:
     bytes_sent: int
     seconds: float
     status: int
-    first_request_s: float  # TCP + TLS + one round trip to api.telegram.org
+    first_request_s: float  # TCP + TLS (if HTTPS) + one round trip to the Bot API server
 
     @property
     def bytes_per_s(self) -> float:
@@ -93,11 +102,55 @@ def mbit(bytes_per_s: float) -> str:
     return "inf" if bytes_per_s == float("inf") else f"{bytes_per_s * 8 / 1e6:.1f} Mbit/s"
 
 
-async def probe_telegram_upload(size_bytes: int) -> UploadProbe:
+def resolve_api_url(api_url: str | None, local: bool, settings: Settings) -> str:
+    """Select the Bot API base URL (`--local` uses Settings.local_bot_api_url)."""
+    if local and api_url is not None:
+        raise SystemExit("Use either --local or --api-url, not both.")
+    return (settings.local_bot_api_url if local else (api_url or TELEGRAM_API)).rstrip("/")
+
+
+def recommend_vps_pairing(ams_ms: float | None, dc5_ms: float | None, *, near_ms: float = 35.0) -> str:
+    """Return a 1-line VPS/Bot-API pairing recommendation from AMS and DC5 TCP 443 RTTs."""
+    if ams_ms is None and dc5_ms is None:
+        return "RTT probe failed (no TCP 443 reachability to Telegram); check firewall/egress."
+    ams = float("inf") if ams_ms is None else ams_ms
+    dc5 = float("inf") if dc5_ms is None else dc5_ms
+    if dc5 <= near_ms and dc5 <= ams:
+        return "Near DC5 (Singapore) -> use Singapore + BOT_API_MODE=local (recommended, up to 2 GB)."
+    if ams <= near_ms and ams < dc5:
+        return "Near api.telegram.org (EU/AMS) -> use EU/AMS + hosted API (<= 49 MB; avoid BOT_API_MODE=local here)."
+    return (
+        "Far from both AMS and DC5 -> migrate to Singapore + BOT_API_MODE=local (recommended, up to 2 GB) "
+        "or EU/AMS + hosted API (<= 49 MB)."
+    )
+
+
+async def tcp_rtt_ms(host: str, port: int = 443, timeout: float = 3.0) -> float | None:
+    """Return TCP connect RTT in milliseconds (excluding DNS), or None on timeout/network error."""
+    loop = asyncio.get_running_loop()
+    try:
+        infos = await asyncio.wait_for(
+            loop.getaddrinfo(host, port, family=socket.AF_INET, type=socket.SOCK_STREAM),
+            timeout=timeout,
+        )
+        addr = infos[0][4][0]
+        t0 = time.monotonic()
+        _, writer = await asyncio.wait_for(asyncio.open_connection(addr, port), timeout=timeout)
+    except (OSError, TimeoutError, IndexError):
+        return None
+    rtt_ms = (time.monotonic() - t0) * 1000.0
+    writer.close()
+    with contextlib.suppress(OSError):
+        await writer.wait_closed()
+    return rtt_ms
+
+
+async def probe_telegram_upload(size_bytes: int, api_url: str = TELEGRAM_API) -> UploadProbe:
+    base = api_url.rstrip("/")
     connector = aiohttp.TCPConnector(socket_factory=tuned_socket_factory, limit=1, keepalive_timeout=60)
     async with aiohttp.ClientSession(connector=connector) as session:
         t0 = time.monotonic()
-        async with session.get(f"{TELEGRAM_API}/") as resp:
+        async with session.get(f"{base}/") as resp:
             await resp.read()
         first = time.monotonic() - t0
         form = aiohttp.FormData()
@@ -106,7 +159,7 @@ async def probe_telegram_upload(size_bytes: int) -> UploadProbe:
             "document", os.urandom(size_bytes), filename="probe.bin", content_type="application/octet-stream"
         )
         t0 = time.monotonic()
-        async with session.post(f"{TELEGRAM_API}/bot{INVALID_TOKEN}/sendDocument", data=form) as resp:
+        async with session.post(f"{base}/bot{INVALID_TOKEN}/sendDocument", data=form) as resp:
             await resp.read()
             status = resp.status
         return UploadProbe(size_bytes, time.monotonic() - t0, status, first)
@@ -172,17 +225,32 @@ def report(links: list[LinkTiming], upload: UploadProbe | None, *, budget_s: flo
     return failures
 
 
+def _fmt_ms(ms: float | None) -> str:
+    return "unreachable" if ms is None else f"{ms:.1f} ms"
+
+
 async def amain(args: argparse.Namespace) -> int:
+    settings = Settings()
+    api_url = resolve_api_url(args.api_url, args.local, settings)
+    ams_ms, dc5_ms = await asyncio.gather(tcp_rtt_ms(TELEGRAM_AMS_HOST), tcp_rtt_ms(TELEGRAM_DC5_HOST))
+    print(
+        f"Telegram TCP 443 RTT: {TELEGRAM_AMS_HOST} (AMS)={_fmt_ms(ams_ms)}, "
+        f"DC5 (SG {TELEGRAM_DC5_HOST})={_fmt_ms(dc5_ms)}",
+        flush=True,
+    )
+    print(f"  Recommendation: {recommend_vps_pairing(ams_ms, dc5_ms)}", flush=True)
+
     upload: UploadProbe | None = None
     if args.upload_mb > 0:
         size = int(args.upload_mb * 1_000_000)
-        print(f"Measuring upload to {TELEGRAM_API} with {size / 1e6:.1f} MB of random bytes (invalid token, no "
+        print(f"Measuring upload to {api_url} with {size / 1e6:.1f} MB of random bytes (invalid token, no "
               "delivery)...", flush=True)  # fmt: skip
-        upload = await probe_telegram_upload(size)
+        upload = await probe_telegram_upload(size, api_url)
         print(f"  {upload.bytes_sent / 1e6:.1f} MB in {upload.seconds:.1f} s -> {upload.bytes_per_s / 1e6:.2f} MB/s "
               f"({mbit(upload.bytes_per_s)}); first request {upload.first_request_s:.2f} s; "
               f"HTTP {upload.status} (401 expected)")  # fmt: skip
-    settings = Settings()
+    if not args.links:
+        return 0
     backend = LocalExtractionBackend(settings)
     links: list[LinkTiming] = []
     try:
@@ -201,6 +269,12 @@ def main() -> None:
     parser.add_argument("links", nargs="*", help="public TikTok / Instagram / X post links to time")
     parser.add_argument("--budget", type=float, default=6.0, help="send-to-delivered target in seconds")
     parser.add_argument("--upload-mb", type=float, default=8.0, help="upload probe size in MB (0 = skip)")
+    parser.add_argument("--api-url", default=None, help=f"Bot API base URL to probe (default: {TELEGRAM_API})")
+    parser.add_argument(
+        "--local",
+        action="store_true",
+        help="probe Settings().local_bot_api_url (e.g. http://127.0.0.1:8081) instead of api.telegram.org",
+    )
     parser.add_argument(
         "--telegram-overhead", type=float, default=1.5, help="assumed Telegram-side processing seconds per send"
     )

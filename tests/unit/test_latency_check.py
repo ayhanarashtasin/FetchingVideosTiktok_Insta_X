@@ -2,16 +2,24 @@
 
 from __future__ import annotations
 
+import asyncio
 import math
 
+import pytest
+
+from app.config import Settings
 from scripts.latency_check import (
     INVALID_TOKEN,
+    TELEGRAM_API,
     LinkTiming,
     UploadProbe,
     mbit,
     project_total,
+    recommend_vps_pairing,
     report,
     required_upload_bytes_per_s,
+    resolve_api_url,
+    tcp_rtt_ms,
 )
 
 
@@ -46,3 +54,38 @@ def test_report_counts_fail_and_pass_and_errors(capsys):
 def test_probe_token_can_never_be_a_real_bot_token():
     bot_id, secret = INVALID_TOKEN.split(":")
     assert int(bot_id) == 0 and set(secret) == {"A"}
+
+
+def test_recommend_vps_pairing():
+    assert "Singapore + BOT_API_MODE=local" in recommend_vps_pairing(158.0, 2.0)
+    assert "EU/AMS + hosted API" in recommend_vps_pairing(3.0, 158.0)
+    far = recommend_vps_pairing(195.0, 70.0)
+    assert "Singapore + BOT_API_MODE=local" in far and "EU/AMS + hosted API" in far
+    assert "Singapore + BOT_API_MODE=local" in recommend_vps_pairing(None, 2.5)
+    assert "EU/AMS + hosted API" in recommend_vps_pairing(4.0, None)
+    assert "failed" in recommend_vps_pairing(None, None).lower()
+
+
+def test_resolve_api_url():
+    settings = Settings(_env_file=None, local_bot_api_url="http://127.0.0.1:8081/")
+    assert resolve_api_url(None, False, settings) == TELEGRAM_API
+    assert resolve_api_url(None, True, settings) == "http://127.0.0.1:8081"
+    assert resolve_api_url("http://127.0.0.1:9000/", False, settings) == "http://127.0.0.1:9000"
+    with pytest.raises(SystemExit):
+        resolve_api_url("http://127.0.0.1:9000", True, settings)
+
+
+async def test_tcp_rtt_ms_measures_loopback_and_handles_closed_port():
+    async def _noop(_reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        writer.close()
+        await writer.wait_closed()
+
+    server = await asyncio.start_server(_noop, "127.0.0.1", 0)
+    port = server.sockets[0].getsockname()[1]
+    try:
+        rtt = await tcp_rtt_ms("127.0.0.1", port, timeout=2.0)
+        assert rtt is not None and 0.0 <= rtt < 1000.0
+    finally:
+        server.close()
+        await server.wait_closed()
+    assert await tcp_rtt_ms("127.0.0.1", port, timeout=1.0) is None

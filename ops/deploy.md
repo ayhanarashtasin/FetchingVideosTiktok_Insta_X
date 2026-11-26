@@ -10,19 +10,33 @@ workload). No inbound port is needed: the bot uses Telegram long polling. For ru
 
 ## 1. Linux VPS host preparation
 
-**Pick the location for speed first.**
-* The bot uploads every fresh video to Telegram, so that upload, not CPU, sets the send-to-delivered time.
-* **Hosted Bot API:** every upload goes to `api.telegram.org`, which appears to be served from Amsterdam (inferred from
-  its IP and round-trip time). A host in or near the Netherlands or Germany is a sensible first candidate.
-* **Local Bot API server (section 6):** uploads go to the bot's own Telegram data centre instead, so pick a host near
-  that DC. This bot's files live on DC5, Singapore: from Singapore datacenters DC5 measured ~2 ms against ~158 ms to
-  `api.telegram.org`. See
-  [troubleshooting](troubleshooting.md#delivery-takes-minutes-instead-of-seconds) for how the DC was determined.
-* Before deploying, clone the repo on the candidate and run `uv run python scripts/latency_check.py --budget 4 <links>`.
-  Use 4 s for a 6 s stopwatch target, which leaves about 2 s for Telegram and the client. It needs no token and sends
-  nothing.
-* See [troubleshooting: delivery takes minutes](troubleshooting.md#delivery-takes-minutes-instead-of-seconds) for
-  how to read it, and for the residential-connection numbers that motivated this check.
+### Fast < 6s VPS Choice
+
+The bot uploads every fresh video to Telegram, so the network path to Telegram — not CPU — decides send-to-delivered
+time. Pick the region and Bot API mode as a matched pair:
+
+| Option | Region & Bot API mode | Upload limit | Latency profile | Setup |
+| --- | --- | --- | --- | --- |
+| **Recommended (full quality < 6 s)** | **Singapore VPS** + `BOT_API_MODE=local` (`tdlib/telegram-bot-api`) | Up to **2 GB** | ~2 ms to this bot's home DC5 (`91.108.56.130`) | Quick Docker container (`aiogram/telegram-bot-api`) or native C++ build ([Section 6](#6-hosted-vs-local-telegram-bot-api)) |
+| **Simpler alternative** | **EU / Amsterdam / Germany VPS** + `BOT_API_MODE=hosted` | Up to **49 MB** | ~1–5 ms to `api.telegram.org` (Amsterdam) | Zero TDLib setup (default) |
+
+> **Warnings:**
+> * **Never** pair an EU VPS with `BOT_API_MODE=local`: this bot's files live on DC5 (Singapore), so EU <-> SG adds ~158 ms RTT and defeats local mode.
+> * **Never** run Windows `start-bot.bat` and VPS `tmd-bot` simultaneously on the same `BOT_TOKEN`: Telegram rejects duplicate `getUpdates` pollers with a conflict error.
+
+Before migrating, clone the repo on the candidate VPS and run:
+
+```bash
+uv run python scripts/latency_check.py --budget 4 <one or more public post links>
+# Once a local telegram-bot-api server is running, also verify loopback ingest:
+uv run python scripts/latency_check.py --local --budget 4 <one or more public post links>
+```
+
+It probes concurrent TCP 443 RTT to `api.telegram.org` (AMS) and DC5 (`91.108.56.130`, SG), prints the matching VPS
+pairing recommendation, and times upload + extraction against a 4 s bot budget (~6 s stopwatch target, leaving ~2 s for
+Telegram and the client). It needs no token and sends nothing. See
+[troubleshooting: delivery takes minutes](troubleshooting.md#delivery-takes-minutes-instead-of-seconds) for how to read
+it and how DC5 was determined.
 
 Before putting a bot token on the server, harden the host:
 
@@ -66,13 +80,15 @@ The script is idempotent (safe to re-run) and performs:
 3. **Python 3.12 environment:** runs `uv sync --locked --no-dev` as the service user, creating `.venv/` with exact
    locked dependencies (`aiogram`, `yt-dlp`, `gallery-dl`, etc.).
 4. **Idempotent `.env` setup:** copies `.env.example` to `.env` (`chmod 0600`) only if `.env` does not already exist;
-   preserves your existing tuned values on re-runs (backfilling only missing/empty keys), sets `APP_ENV=production` and
-   `WORKER_MODE=inprocess` on a fresh `.env`, and prompts (with hidden input) for `BOT_TOKEN` (unless `BOT_TOKEN_FILE`
-   is set) and access settings (`ALLOWED_USER_IDS` or `PUBLIC_ACCESS=true`) if still set to placeholders.
+   preserves your existing tuned values on re-runs (backfilling only missing/empty keys), sets `APP_ENV=production`,
+   `WORKER_MODE=inprocess`, and `NATIVE_HEVC=true` (prevents 5–15 s CPU transcoding of TikTok HEVC videos on GPU-less
+   VPSes) on a fresh `.env`, and prompts (with hidden input) for `BOT_TOKEN` (unless `BOT_TOKEN_FILE` is set) and access
+   settings (`ALLOWED_USER_IDS` or `PUBLIC_ACCESS=true`) if still set to placeholders.
 5. **Directories & validation:** pre-creates `data/`, `tmp/jobs/`, and `secrets/` (`0700`, files inside `secrets/` set
    to `0600`) with proper ownership and validates `.env` with `Settings().validate_for_startup()`.
-6. **Hardened `systemd` unit:** writes `/etc/systemd/system/tmd-bot.service`, runs `systemctl daemon-reload`, enables
-   `tmd-bot`, and starts it.
+6. **Hardened `systemd` unit:** writes `/etc/systemd/system/tmd-bot.service` (with
+   `After=network-online.target telegram-bot-api.service` for clean boot ordering when local Bot API is enabled), runs
+   `systemctl daemon-reload`, enables `tmd-bot`, and starts it.
 
 Key hardening settings in `/etc/systemd/system/tmd-bot.service`:
 
@@ -174,14 +190,44 @@ is valid.
 
 ## 6. Hosted vs local Telegram Bot API
 
-* **Hosted** (default, `BOT_API_MODE=hosted`): uploads up to 50 MB per file (photos 10 MB, `w+h <= 10,000`, ratio `<= 20`).
-* **Local** (`BOT_API_MODE=local`, `LOCAL_BOT_API_URL=http://127.0.0.1:8081`): uploads up to 2,000 MB (`LOCAL_FILE_MAX_BYTES`
-  defaults to 1,900 MB). Build and run [tdlib/telegram-bot-api](https://github.com/tdlib/telegram-bot-api) natively as a
-  separate `systemd` service bound strictly to `--http-ip-address=127.0.0.1 --http-port=8081` (never exposed publicly),
-  passing your API ID and hash from <https://my.telegram.org> via its own restricted environment/service config (never
-  read by the bot).
+### Fast < 6s VPS Choice
 
-**Building and running it on Ubuntu/Debian** (from the upstream build instructions; not yet verified on a live VPS):
+* **Recommended (full quality < 6 s, up to 2 GB):** **Singapore VPS** + `BOT_API_MODE=local`
+  (`LOCAL_BOT_API_URL=http://127.0.0.1:8081`, `LOCAL_FILE_MAX_BYTES` defaults to 1,900 MB). `tdlib/telegram-bot-api`
+  uploads directly to this bot's home DC5 (`91.108.56.130`, ~2 ms from Singapore).
+* **Simpler alternative (up to 49 MB, zero TDLib setup):** **EU / Amsterdam / Germany VPS** + `BOT_API_MODE=hosted`
+  (~1–5 ms to `api.telegram.org`; photos 10 MB, `w+h <= 10,000`, ratio `<= 20`).
+* **Warnings:** **Never** pair an EU VPS with `BOT_API_MODE=local` (~158 ms EU <-> SG to DC5). **Never** run Windows
+  `start-bot.bat` and VPS `tmd-bot` simultaneously on the same `BOT_TOKEN`.
+
+Run [tdlib/telegram-bot-api](https://github.com/tdlib/telegram-bot-api) strictly on loopback (`127.0.0.1:8081`, never
+exposed publicly), passing your API ID and hash from <https://my.telegram.org> via `/etc/telegram-bot-api.env` (`0600`,
+root-only; never read by the bot):
+
+```bash
+printf 'TELEGRAM_API_ID=%s\nTELEGRAM_API_HASH=%s\n' '<api id>' '<api hash>' | sudo tee /etc/telegram-bot-api.env >/dev/null
+sudo chmod 600 /etc/telegram-bot-api.env
+```
+
+Choose either **Option A (Docker, fastest)** or **Option B (native C++ `systemd` build, no Docker)** — neither has been
+verified on a live VPS yet:
+
+**Option A — Quick Docker container (`aiogram/telegram-bot-api`, skips the ~30-min C++ build):**
+
+```bash
+sudo docker run -d \
+  --name telegram-bot-api \
+  --restart unless-stopped \
+  -p 127.0.0.1:8081:8081 \
+  --env-file /etc/telegram-bot-api.env \
+  -e TELEGRAM_LOCAL=1 \
+  -v telegram-bot-api-data:/var/lib/telegram-bot-api \
+  aiogram/telegram-bot-api:latest
+```
+
+Always keep the `127.0.0.1:` prefix on `-p 127.0.0.1:8081:8081` (bare `-p 8081:8081` binds `0.0.0.0` and bypasses UFW).
+
+**Option B — Native C++ `systemd` build (zero Docker; from upstream build instructions):**
 
 ```bash
 # A small VPS (< 4 GB RAM) needs swap to compile TDLib (skip if `swapon --show` already lists some):
@@ -191,9 +237,6 @@ git clone --recursive https://github.com/tdlib/telegram-bot-api.git /tmp/telegra
 cmake -S /tmp/telegram-bot-api -B /tmp/telegram-bot-api/build -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr/local
 cmake --build /tmp/telegram-bot-api/build -j 1    # -j 1 keeps memory low; this takes a while
 sudo cmake --install /tmp/telegram-bot-api/build  # -> /usr/local/bin/telegram-bot-api
-# API ID/hash from https://my.telegram.org, readable by root only (the bot never reads them):
-printf 'TELEGRAM_API_ID=%s\nTELEGRAM_API_HASH=%s\n' '<api id>' '<api hash>' | sudo tee /etc/telegram-bot-api.env >/dev/null
-sudo chmod 600 /etc/telegram-bot-api.env
 sudo tee /etc/systemd/system/telegram-bot-api.service >/dev/null <<'UNIT'
 [Unit]
 Description=Telegram Bot API server (local mode, loopback only)
@@ -214,7 +257,8 @@ UNIT
 sudo systemctl daemon-reload
 ```
 
-Then switch the bot over as below. The final step starts the server with `sudo systemctl enable --now telegram-bot-api`.
+Then switch the bot over as below (`tmd-bot.service` already includes `After=network-online.target telegram-bot-api.service`
+for clean boot ordering with Option B).
 
 **Switching hosted -> local** (never poll from both at once):
 
@@ -227,10 +271,12 @@ from app.config import Settings
 tok = Settings().resolved_token()
 print(u.urlopen(f\"https://api.telegram.org/bot{tok}/logOut\", timeout=20).read().decode())
 "'
-# 2. Start your local telegram-bot-api service on 127.0.0.1:8081:
-sudo systemctl enable --now telegram-bot-api
+# 2. Start your local telegram-bot-api server on 127.0.0.1:8081 (Option A docker container or Option B systemd):
+sudo systemctl enable --now telegram-bot-api    # (Option B; skip if running Option A Docker container)
 # 3. Set BOT_API_MODE=local and LOCAL_BOT_API_URL=http://127.0.0.1:8081 in .env, then:
 sudo systemctl start tmd-bot
+# 4. Benchmark loopback Bot API + pipeline:
+sudo -u tmd bash -c 'cd /opt/tmd && .venv/bin/python scripts/latency_check.py --local --budget 4 <links>'
 ```
 
 Per Telegram's Bot API documentation, after `logOut` you can log in on the local server immediately but **cannot return

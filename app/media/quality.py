@@ -115,18 +115,20 @@ def ranked_choices(formats: list[FormatDescriptor]) -> list[FormatChoice]:
 
     best_audio = max(audio_only, key=lambda p: _audio_key(p[1], p[0]), default=None)
 
-    # Build candidates with their sort key. At equal resolution, a muxed stream stays ahead of a
-    # separate-track merge unless the video-only track has >15% higher bitrate (matching select_format).
-    muxed_by_pixels: dict[int, float] = {}
-    for _i, f in muxed:
-        px = _pixels(f)
-        muxed_by_pixels[px] = max(muxed_by_pixels.get(px, 0.0), f.tbr or 0.0)
+    # Build candidates with their sort key: resolution first, then codec compatibility (so equal-res
+    # H.264 always beats VP9/AV1), then muxed-vs-merge priority (muxed stays ahead of an equal-res,
+    # equal-codec merge unless the video-only track has >15% higher bitrate), then bitrate/mirror/order.
+    muxed_by_tier: dict[tuple[int, int], float] = {}
+    for i, f in muxed:
+        vk = _video_key(f, i)
+        tier = (vk[0], vk[1])
+        muxed_by_tier[tier] = max(muxed_by_tier.get(tier, 0.0), f.tbr or 0.0)
 
     candidates: list[tuple[tuple[int, int, int, float, int, int], FormatChoice]] = []
     for i, m in muxed:
         vk = _video_key(m, i)
-        # priority=1 beats equal-resolution merge unless merge clears the 1.15x bitrate bar (priority=2)
-        key = (vk[0], 1, vk[1], vk[2], vk[3], vk[4])
+        # priority=1 beats equal-resolution/codec merge unless merge clears the 1.15x bitrate bar (priority=2)
+        key = (vk[0], vk[1], 1, vk[2], vk[3], vk[4])
         choice = FormatChoice(m.format_id if _safe(m) else FALLBACK_SELECTOR, m, None, merge=False)
         candidates.append((key, choice))
 
@@ -134,15 +136,16 @@ def ranked_choices(formats: list[FormatDescriptor]) -> list[FormatChoice]:
         vk = _video_key(v, i)
         if best_audio is not None:
             a = best_audio[1]
-            m_tbr = muxed_by_pixels.get(vk[0], 0.0)
+            tier = (vk[0], vk[1])
+            m_tbr = muxed_by_tier.get(tier, 0.0)
             v_tbr = v.tbr or 0.0
-            beats_muxed = (vk[0] not in muxed_by_pixels) or (m_tbr > 0 and v_tbr > m_tbr * 1.15)
+            beats_muxed = (tier not in muxed_by_tier) or (m_tbr > 0 and v_tbr > m_tbr * 1.15)
             prio = 2 if beats_muxed else 0
-            key = (vk[0], prio, vk[1], vk[2], vk[3], vk[4])
+            key = (vk[0], vk[1], prio, vk[2], vk[3], vk[4])
             selector = f"{v.format_id}+{a.format_id}" if (_safe(v) and _safe(a)) else FALLBACK_SELECTOR
             candidates.append((key, FormatChoice(selector, v, a, merge=True)))
         else:
-            key = (vk[0], 1, vk[1], vk[2], vk[3], vk[4])
+            key = (vk[0], vk[1], 1, vk[2], vk[3], vk[4])
             choice = FormatChoice(v.format_id if _safe(v) else FALLBACK_SELECTOR, v, None, merge=False)
             candidates.append((key, choice))
 
