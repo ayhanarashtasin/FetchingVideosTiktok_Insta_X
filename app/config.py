@@ -98,6 +98,9 @@ class Settings(BaseSettings):
     hosted_file_max_bytes: Annotated[int, Field(ge=1)] = 49_000_000
     local_file_max_bytes: Annotated[int, Field(ge=1)] = 1_900_000_000
     native_hevc: bool = False
+    fast_api_enabled: bool = True
+    direct_telegram_url: bool = True
+    media_cache_ttl_seconds: Annotated[int, Field(ge=0, le=604_800)] = 86_400
 
     # --- retention / cleanup ---------------------------------------------------------
     job_metadata_ttl_hours: Annotated[int, Field(ge=1, le=168)] = 24

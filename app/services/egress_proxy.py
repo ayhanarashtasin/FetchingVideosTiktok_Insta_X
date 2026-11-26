@@ -41,8 +41,8 @@ DEFAULT_ALLOWED_SUFFIXES: tuple[str, ...] = (
     "byteoversea.com", "ibytedtos.com", "ibyteimg.com",
     # Instagram (pages, API, media CDNs)
     "instagram.com", "cdninstagram.com", "fbcdn.net",
-    # X / Twitter
-    "x.com", "twitter.com", "twimg.com",
+    # X / Twitter (+ keyless public FxTwitter API fast path)
+    "x.com", "twitter.com", "twimg.com", "fxtwitter.com",
 )  # fmt: skip
 MAX_HEADER_BYTES = 8192
 HEADER_TIMEOUT = 10.0

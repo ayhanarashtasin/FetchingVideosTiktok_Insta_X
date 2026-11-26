@@ -54,10 +54,19 @@ def _pixels(f: FormatDescriptor) -> int:
     return (f.width or 0) * (f.height or 0) or (f.height or 0)
 
 
-def _video_key(f: FormatDescriptor, index: int) -> tuple[int, int, float, int]:
+_MIRROR_SUFFIX = re.compile(r"-(\d{1,2})$")
+
+
+def _mirror_priority(format_id: str) -> int:
+    """Prefer primary CDN mirrors (`-0`) over backup mirrors (`-1`, `-2`) when quality is tied."""
+    m = _MIRROR_SUFFIX.search(format_id)
+    return -int(m.group(1)) if m else 0
+
+
+def _video_key(f: FormatDescriptor, index: int) -> tuple[int, int, float, int, int]:
     fam = _codec_family(f.vcodec)
     compat = {"h264": 2, "unknown": 1, "hevc": 1}.get(fam, 0)
-    return (_pixels(f), compat, f.tbr or 0.0, index)  # index: the extractor's own order breaks ties
+    return (_pixels(f), compat, f.tbr or 0.0, _mirror_priority(f.format_id), index)
 
 
 def _audio_key(f: FormatDescriptor, index: int) -> tuple[int, float, int]:
@@ -113,11 +122,11 @@ def ranked_choices(formats: list[FormatDescriptor]) -> list[FormatChoice]:
         px = _pixels(f)
         muxed_by_pixels[px] = max(muxed_by_pixels.get(px, 0.0), f.tbr or 0.0)
 
-    candidates: list[tuple[tuple[int, int, int, float, int], FormatChoice]] = []
+    candidates: list[tuple[tuple[int, int, int, float, int, int], FormatChoice]] = []
     for i, m in muxed:
         vk = _video_key(m, i)
         # priority=1 beats equal-resolution merge unless merge clears the 1.15x bitrate bar (priority=2)
-        key = (vk[0], 1, vk[1], vk[2], vk[3])
+        key = (vk[0], 1, vk[1], vk[2], vk[3], vk[4])
         choice = FormatChoice(m.format_id if _safe(m) else FALLBACK_SELECTOR, m, None, merge=False)
         candidates.append((key, choice))
 
@@ -129,11 +138,11 @@ def ranked_choices(formats: list[FormatDescriptor]) -> list[FormatChoice]:
             v_tbr = v.tbr or 0.0
             beats_muxed = (vk[0] not in muxed_by_pixels) or (m_tbr > 0 and v_tbr > m_tbr * 1.15)
             prio = 2 if beats_muxed else 0
-            key = (vk[0], prio, vk[1], vk[2], vk[3])
+            key = (vk[0], prio, vk[1], vk[2], vk[3], vk[4])
             selector = f"{v.format_id}+{a.format_id}" if (_safe(v) and _safe(a)) else FALLBACK_SELECTOR
             candidates.append((key, FormatChoice(selector, v, a, merge=True)))
         else:
-            key = (vk[0], 1, vk[1], vk[2], vk[3])
+            key = (vk[0], 1, vk[1], vk[2], vk[3], vk[4])
             choice = FormatChoice(v.format_id if _safe(v) else FALLBACK_SELECTOR, v, None, merge=False)
             candidates.append((key, choice))
 

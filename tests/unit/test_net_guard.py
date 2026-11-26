@@ -169,3 +169,24 @@ async def test_pinned_resolver_filters_by_family():
     assert [r["host"] for r in v6] == ["2606:4700:4700::1111"]
     assert len(both) == 2
     assert all(r["port"] == 443 and r["hostname"] == "h.example" for r in both)
+
+
+@pytest.mark.parametrize("linux", [True, False])
+def test_socket_tuning_keeps_linux_autotuning_and_enlarges_elsewhere(monkeypatch, linux):
+    """On Linux an explicit SO_SNDBUF/SO_RCVBUF locks the buffer (autotuning off) and is clamped to
+    net.core.*mem_max (208 KiB by default), which would cap long-RTT uploads; elsewhere enlarge to 1 MiB."""
+    import app.core.net_guard as ng
+
+    monkeypatch.setattr(ng, "_KERNEL_AUTOTUNES_BUFFERS", linux)
+    tuned = ng.tuned_socket_factory((socket.AF_INET, socket.SOCK_STREAM, 0))
+    plain = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        assert tuned.getsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY) != 0
+        for opt in (socket.SO_SNDBUF, socket.SO_RCVBUF):
+            if linux:
+                assert tuned.getsockopt(socket.SOL_SOCKET, opt) == plain.getsockopt(socket.SOL_SOCKET, opt)
+            else:
+                assert tuned.getsockopt(socket.SOL_SOCKET, opt) >= ng.TCP_BUFFER_BYTES
+    finally:
+        tuned.close()
+        plain.close()

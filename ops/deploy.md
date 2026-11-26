@@ -10,6 +10,20 @@ workload). No inbound port is needed: the bot uses Telegram long polling. For ru
 
 ## 1. Linux VPS host preparation
 
+**Pick the location for speed first.**
+* The bot uploads every fresh video to Telegram, so that upload, not CPU, sets the send-to-delivered time.
+* **Hosted Bot API:** every upload goes to `api.telegram.org`, which appears to be served from Amsterdam (inferred from
+  its IP and round-trip time). A host in or near the Netherlands or Germany is a sensible first candidate.
+* **Local Bot API server (section 6):** uploads go to the bot's own Telegram data centre instead, so pick a host near
+  that DC. This bot's files live on DC5, Singapore: from Singapore datacenters DC5 measured ~2 ms against ~158 ms to
+  `api.telegram.org`. See
+  [troubleshooting](troubleshooting.md#delivery-takes-minutes-instead-of-seconds) for how the DC was determined.
+* Before deploying, clone the repo on the candidate and run `uv run python scripts/latency_check.py --budget 4 <links>`.
+  Use 4 s for a 6 s stopwatch target, which leaves about 2 s for Telegram and the client. It needs no token and sends
+  nothing.
+* See [troubleshooting: delivery takes minutes](troubleshooting.md#delivery-takes-minutes-instead-of-seconds) for
+  how to read it, and for the residential-connection numbers that motivated this check.
+
 Before putting a bot token on the server, harden the host:
 
 * SSH keys only (`PasswordAuthentication no`, `PermitRootLogin no`), a non-root sudo user (or let `ops/setup-ubuntu.sh`
@@ -167,6 +181,41 @@ is valid.
   passing your API ID and hash from <https://my.telegram.org> via its own restricted environment/service config (never
   read by the bot).
 
+**Building and running it on Ubuntu/Debian** (from the upstream build instructions; not yet verified on a live VPS):
+
+```bash
+# A small VPS (< 4 GB RAM) needs swap to compile TDLib (skip if `swapon --show` already lists some):
+sudo fallocate -l 4G /swapfile && sudo chmod 600 /swapfile && sudo mkswap /swapfile && sudo swapon /swapfile
+sudo apt-get install -y make git zlib1g-dev libssl-dev gperf cmake g++
+git clone --recursive https://github.com/tdlib/telegram-bot-api.git /tmp/telegram-bot-api
+cmake -S /tmp/telegram-bot-api -B /tmp/telegram-bot-api/build -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr/local
+cmake --build /tmp/telegram-bot-api/build -j 1    # -j 1 keeps memory low; this takes a while
+sudo cmake --install /tmp/telegram-bot-api/build  # -> /usr/local/bin/telegram-bot-api
+# API ID/hash from https://my.telegram.org, readable by root only (the bot never reads them):
+printf 'TELEGRAM_API_ID=%s\nTELEGRAM_API_HASH=%s\n' '<api id>' '<api hash>' | sudo tee /etc/telegram-bot-api.env >/dev/null
+sudo chmod 600 /etc/telegram-bot-api.env
+sudo tee /etc/systemd/system/telegram-bot-api.service >/dev/null <<'UNIT'
+[Unit]
+Description=Telegram Bot API server (local mode, loopback only)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+EnvironmentFile=/etc/telegram-bot-api.env
+DynamicUser=true
+StateDirectory=telegram-bot-api
+ExecStart=/usr/local/bin/telegram-bot-api --local --http-ip-address=127.0.0.1 --http-port=8081 --dir=/var/lib/telegram-bot-api
+Restart=on-failure
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+sudo systemctl daemon-reload
+```
+
+Then switch the bot over as below. The final step starts the server with `sudo systemctl enable --now telegram-bot-api`.
+
 **Switching hosted -> local** (never poll from both at once):
 
 ```bash
@@ -178,7 +227,8 @@ from app.config import Settings
 tok = Settings().resolved_token()
 print(u.urlopen(f\"https://api.telegram.org/bot{tok}/logOut\", timeout=20).read().decode())
 "'
-# 2. Start your local telegram-bot-api service on 127.0.0.1:8081.
+# 2. Start your local telegram-bot-api service on 127.0.0.1:8081:
+sudo systemctl enable --now telegram-bot-api
 # 3. Set BOT_API_MODE=local and LOCAL_BOT_API_URL=http://127.0.0.1:8081 in .env, then:
 sudo systemctl start tmd-bot
 ```

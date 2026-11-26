@@ -167,7 +167,7 @@ async def test_a_single_video_is_sent_with_sendvideo(tmp_path, media):  # AT01
         resend = e.server.calls_of("sendVideo")[-1]
         assert resend.fields["video"] == video.reply["video"]["file_id"] and not resend.files
         assert resend.fields["caption"] == f"{TT_VIDEO}\n120p"
-        assert len(e.tools.calls_to("yt_dlp")) == 4  # both requests rechecked and fetched the source
+        assert len(e.tools.calls_to("yt_dlp")) == 2  # repeat hit the pre-extraction file_id cache (no 2nd yt-dlp run)
     finally:
         await e.stop()
 

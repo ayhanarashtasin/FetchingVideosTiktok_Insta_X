@@ -16,6 +16,7 @@ import asyncio
 import logging
 import os
 import shutil
+import subprocess
 import time
 from collections.abc import Callable
 from pathlib import Path
@@ -31,6 +32,38 @@ log = logging.getLogger(__name__)
 DURATION_TOLERANCE = 0.5  # seconds: container rounding only; a bigger gap means something was cut
 REMUX_CONCURRENCY = 2
 TRANSCODE_CRF = "25"  # ~25% smaller uploads than CRF 23 while keeping clean mobile/desktop quality
+NVENC_CQ = "33"  # matches libx264 CRF 25 file size while encoding ~2-3x faster on NVIDIA GPUs
+_HW_ENCODER_CACHE: dict[str, str | None] = {}
+
+
+def _probe_hw_h264_sync(ffmpeg: str) -> str | None:
+    """Return `'h264_nvenc'` if working on this host, else `None`. Result is cached per ffmpeg binary."""
+    if ffmpeg in _HW_ENCODER_CACHE:
+        return _HW_ENCODER_CACHE[ffmpeg]
+    try:
+        res = subprocess.run(
+            [
+                ffmpeg, "-nostdin", "-hide_banner", "-loglevel", "error",
+                "-f", "lavfi", "-i", "color=c=black:s=256x256:r=1", "-frames:v", "1",
+                "-c:v", "h264_nvenc", "-preset", "p2", "-pix_fmt", "yuv420p", "-f", "null", "-",
+            ],
+            capture_output=True,
+            timeout=5,
+            check=False,
+        )  # fmt: skip
+        found = "h264_nvenc" if res.returncode == 0 else None
+    except (OSError, subprocess.SubprocessError):
+        found = None
+    _HW_ENCODER_CACHE[ffmpeg] = found
+    return found
+
+
+async def _hw_h264_encoder(ffmpeg: str, runner: ProcessRunner) -> str | None:
+    if not isinstance(runner, SubprocessRunner):
+        return None
+    if ffmpeg in _HW_ENCODER_CACHE:
+        return _HW_ENCODER_CACHE[ffmpeg]
+    return await asyncio.to_thread(_probe_hw_h264_sync, ffmpeg)
 
 
 def _transcode_encode_args(
@@ -38,6 +71,7 @@ def _transcode_encode_args(
     audio_codec: str | None,
     duration_seconds: float | None,
     max_file_bytes: int | None,
+    hw_encoder: str | None = None,
 ) -> list[str]:
     """Shared H.264 (yuv420p) + AAC encoding flags for single-file transcode and split-track merge."""
     audio_fam = _audio_family(audio_codec) if audio_codec else None
@@ -51,9 +85,18 @@ def _transcode_encode_args(
         # Only cap VBV when needed (< 50 Mbps); huge caps (e.g. 1.9 GB on short clips) overflow x264's 32-bit VBV.
         if video_max_kbps < 50_000:
             rate_args = ["-maxrate", f"{video_max_kbps}k", "-bufsize", f"{video_max_kbps * 2}k"]
+    if hw_encoder == "h264_nvenc":
+        vcodec_args = [
+            "-c:v", "h264_nvenc", "-preset", "p2", "-rc", "vbr", "-cq", NVENC_CQ, "-b:v", "0",
+            *rate_args, "-pix_fmt", "yuv420p",
+        ]  # fmt: skip
+    else:
+        vcodec_args = [
+            "-c:v", "libx264", "-preset", "veryfast", "-crf", TRANSCODE_CRF, *rate_args, "-pix_fmt", "yuv420p",
+        ]  # fmt: skip
     return [
         "-vf", "scale=max(2\\,trunc(iw/2)*2):max(2\\,trunc(ih/2)*2)",
-        "-c:v", "libx264", "-preset", "veryfast", "-crf", TRANSCODE_CRF, *rate_args, "-pix_fmt", "yuv420p",
+        *vcodec_args,
         *audio_args,
     ]  # fmt: skip
 
@@ -180,41 +223,48 @@ async def transcode_to_mp4(
     max_file_bytes: int | None = None,
 ) -> MediaAsset | None:
     """Transcode a non-native video to H.264 (`yuv420p`) + AAC `.mp4` (`+faststart`) for inline playback."""
+    hw = await _hw_h264_encoder(ffmpeg, runner)
+    encoders: tuple[str | None, ...] = (hw, None) if hw is not None else (None,)
+    for enc in encoders:
 
-    def _build_args(src: Path, dest: Path) -> list[str]:
-        encode_args = _transcode_encode_args(
-            audio_codec=asset.audio_codec,
-            duration_seconds=asset.duration_seconds,
-            max_file_bytes=max_file_bytes,
-        )
-        return [
-            ffmpeg, "-nostdin", "-hide_banner", "-loglevel", "error", "-y",
-            "-protocol_whitelist", "file", "-i", str(src),
-            "-map", "0:V", "-map", "0:a?",
-            *encode_args,
-            "-movflags", "+faststart", "-f", "mp4", str(dest),
-        ]  # fmt: skip
-
-    return await _run_ffmpeg_mp4(
-        asset,
-        prefix="tc",
-        build_args=_build_args,
-        runner=runner,
-        timeout=timeout,
-        min_free_bytes=min_free_bytes,
-        max_file_bytes=max_file_bytes,
-        processing=Processing.TRANSCODED,
-        valid_probe=lambda probed: (
-            probed.kind is ItemKind.VIDEO
-            and is_native_video(
-                container=probed.container,
-                video_codec=probed.video_codec,
-                audio_codec=probed.audio_codec,
-                pix_fmt=probed.pix_fmt,
-                native_hevc=False,
+        def _build_args(src: Path, dest: Path, _enc: str | None = enc) -> list[str]:
+            encode_args = _transcode_encode_args(
+                audio_codec=asset.audio_codec,
+                duration_seconds=asset.duration_seconds,
+                max_file_bytes=max_file_bytes,
+                hw_encoder=_enc,
             )
-        ),
-    )
+            return [
+                ffmpeg, "-nostdin", "-hide_banner", "-loglevel", "error", "-y",
+                "-protocol_whitelist", "file", "-i", str(src),
+                "-map", "0:V", "-map", "0:a?",
+                *encode_args,
+                "-movflags", "+faststart", "-f", "mp4", str(dest),
+            ]  # fmt: skip
+
+        out = await _run_ffmpeg_mp4(
+            asset,
+            prefix="tc",
+            build_args=_build_args,
+            runner=runner,
+            timeout=timeout,
+            min_free_bytes=min_free_bytes,
+            max_file_bytes=max_file_bytes,
+            processing=Processing.TRANSCODED,
+            valid_probe=lambda probed: (
+                probed.kind is ItemKind.VIDEO
+                and is_native_video(
+                    container=probed.container,
+                    video_codec=probed.video_codec,
+                    audio_codec=probed.audio_codec,
+                    pix_fmt=probed.pix_fmt,
+                    native_hevc=False,
+                )
+            ),
+        )
+        if out is not None:
+            return out
+    return None
 
 
 async def merge_tracks_to_mp4(
@@ -349,13 +399,20 @@ async def merge_tracks_to_mp4(
             )
             return mp4_out, Processing.MERGED
 
-    encode_args = _transcode_encode_args(
-        audio_codec=audio_codec,
-        duration_seconds=v_info.duration_seconds,
-        max_file_bytes=max_file_bytes,
-    )
-    tc_args = [*base_inputs, *encode_args, "-movflags", "+faststart", "-f", "mp4", str(mp4_out)]
-    probed = await _run_merge(mp4_out, tc_args, require_native=True, native_hevc_ok=False)
+    hw = await _hw_h264_encoder(exe, run)
+    encoders: tuple[str | None, ...] = (hw, None) if hw is not None else (None,)
+    probed = None
+    for enc in encoders:
+        encode_args = _transcode_encode_args(
+            audio_codec=audio_codec,
+            duration_seconds=v_info.duration_seconds,
+            max_file_bytes=max_file_bytes,
+            hw_encoder=enc,
+        )
+        tc_args = [*base_inputs, *encode_args, "-movflags", "+faststart", "-f", "mp4", str(mp4_out)]
+        probed = await _run_merge(mp4_out, tc_args, require_native=True, native_hevc_ok=False)
+        if probed is not None:
+            break
     if probed is None:
         return None
     log_event(

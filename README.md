@@ -201,7 +201,7 @@ app/media/        probe, quality selection, lossless remux / H.264 auto-transcod
 app/services/     subprocess runner, workspaces, Telegram sender, optional egress proxy, alerts, health
 app/storage/      SQLite (WAL) and migrations
 ops/              setup-ubuntu.sh, deploy, troubleshooting, dev log, feasibility evidence, test report
-scripts/          feasibility probe, Telegram smoke test, secret scanner
+scripts/          feasibility probe, Telegram smoke test, latency check, secret scanner
 start-bot.bat     Windows native launcher
 tests/            unit, contract, integration, live (opt-in), fixtures
 ```

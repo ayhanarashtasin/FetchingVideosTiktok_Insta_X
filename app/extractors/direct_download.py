@@ -33,10 +33,10 @@ from app.core.net_guard import PinnedResolver, Resolver, is_ip_literal, tuned_so
 
 DEFAULT_USER_AGENT = "Mozilla/5.0"
 MAX_REDIRECTS = 5
-MAX_ITEM_CONCURRENCY = 4
-RANGE_FIRST_BYTES = 1 << 20  # 1 MiB: small photos/clips finish in a single request
+MAX_ITEM_CONCURRENCY = 6
+RANGE_FIRST_BYTES = 256 << 10  # 256 KiB: small photos finish in 1 request; videos fan out 4x faster
 RANGE_MIN_PART_BYTES = 512 << 10  # 512 KiB minimum slice per parallel range connection
-RANGE_CONCURRENCY = 4
+RANGE_CONCURRENCY = 6
 STREAM_CHUNK_BYTES = 256 << 10
 _REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
 _CONTENT_RANGE_RE = re.compile(r"^bytes\s+(\d+)-(\d+)/(\d+)$", re.IGNORECASE)
@@ -146,14 +146,14 @@ class DirectMediaDownloader:
                 connector = self._connector_factory()
             elif self._proxy:
                 connector = aiohttp.TCPConnector(
-                    limit=24,
+                    limit=32,
                     keepalive_timeout=60.0,
                     socket_factory=tuned_socket_factory,
                 )
             else:
                 connector = aiohttp.TCPConnector(
                     resolver=PinnedResolver(self._dns),
-                    limit=24,
+                    limit=32,
                     keepalive_timeout=60.0,
                     socket_factory=tuned_socket_factory,
                 )
@@ -245,6 +245,40 @@ class DirectMediaDownloader:
             self._cleanup(created)
             raise
         return results
+
+    async def probe_size(
+        self,
+        url: str,
+        deadline: Deadline,
+        *,
+        headers: Mapping[str, str] | None = None,
+        timeout: float = 3.0,
+    ) -> int | None:
+        """Real byte size of `url` from a 1-byte `Range` GET (same SSRF-safe redirect validation as a download).
+
+        Returns `None` when the size is unknown (no `Content-Range`/`Content-Length`, an HTTP error, a slow
+        CDN) - callers must treat that as "unknown", never as "small". Policy rejections (`BotError`, e.g. a
+        CDN host resolving to a private address) propagate unchanged.
+        """
+        try:
+            async with asyncio.timeout(max(0.1, min(timeout, deadline.remaining()))):
+                _final, resp = await self._open_following_redirects(
+                    url, headers or {}, deadline, range_header="bytes=0-0"
+                )
+                try:
+                    if resp.status == 206:
+                        match = _CONTENT_RANGE_RE.match(resp.headers.get("Content-Range") or "")
+                        total = int(match.group(3)) if match else 0
+                    elif resp.status == 200:
+                        cl = resp.headers.get("Content-Length") or ""
+                        total = int(cl) if cl.isdigit() else 0
+                    else:
+                        total = 0
+                finally:
+                    resp.release()
+        except (DirectDownloadUnavailable, TimeoutError, aiohttp.ClientError, OSError):
+            return None
+        return total if total > 0 else None
 
     @staticmethod
     def _cleanup(paths: Sequence[Path]) -> None:

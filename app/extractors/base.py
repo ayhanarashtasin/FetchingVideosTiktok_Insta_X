@@ -38,6 +38,7 @@ from app.extractors.direct_download import (
     DirectTarget,
     FileTooLargeDirect,
 )
+from app.extractors.fast_api import FastApiClient, FastVideoVariant
 from app.extractors.gallerydl_runner import GalleryDlRunner
 from app.extractors.ytdlp_runner import YtDlpRunner, YtFormatSource
 from app.services.subprocess_runner import ProcessRunner
@@ -47,6 +48,34 @@ VIDEO_EXT = frozenset({"mp4", "m4v", "mov", "webm", "mkv"})
 AUDIO_EXT = frozenset({"mp3", "m4a", "aac", "opus", "ogg", "wav", "flac"})
 _SAFE_EXT = re.compile(r"^[A-Za-z0-9]{1,8}$")
 
+# Telegram's documented ceilings for media it fetches ITSELF from an HTTP URL (Bot API "Sending files":
+# 5 MB for photos, 20 MB for other content), interpreted conservatively in decimal bytes. Anything
+# bigger is always refused, so offering it by URL only burns a Telegram round trip before the upload.
+TELEGRAM_URL_PHOTO_MAX_BYTES = 5_000_000
+TELEGRAM_URL_VIDEO_MAX_BYTES = 20_000_000
+
+
+def telegram_url_cap(kind: ItemKind) -> int:
+    return TELEGRAM_URL_PHOTO_MAX_BYTES if kind is ItemKind.PHOTO else TELEGRAM_URL_VIDEO_MAX_BYTES
+
+
+@dataclass(frozen=True)
+class DirectUrlItem:
+    """Worker-internal public CDN URL candidate for direct Telegram URL delivery (in-process only)."""
+
+    position: int
+    kind: ItemKind
+    url: str
+    width: int | None = None
+    height: int | None = None
+    duration: float | None = None
+    size_bytes: int | None = None  # real byte size from a 1-byte range probe; None when the CDN did not say
+    variants: tuple[FastVideoVariant, ...] = ()
+
+    def exceeds_url_cap(self) -> bool:
+        """True only when the size is KNOWN to be over Telegram's fetch-by-URL ceiling."""
+        return self.size_bytes is not None and self.size_bytes > telegram_url_cap(self.kind)
+
 
 @dataclass
 class ExtractionContext:
@@ -54,6 +83,7 @@ class ExtractionContext:
     gallerydl: GalleryDlRunner
     max_items: int = 30
     downloader: DirectMediaDownloader | None = None
+    fast_api: FastApiClient | None = None
     file_cap_bytes: int | None = None
     runner: ProcessRunner | None = None
     native_hevc: bool = False
@@ -85,10 +115,13 @@ class Discovered:
     """What `discover` learned, kept (in the worker) so `fetch` does not have to re-ask."""
 
     manifest: PostManifest
-    source: str  # "ytdlp" | "gallerydl"
+    source: str  # "ytdlp" | "gallerydl" | "fast_api"
     nums: dict[int, int] = field(default_factory=dict)  # position -> gallery-dl `num`
     schemes: dict[int, str] = field(default_factory=dict)  # position -> "ytdl" when gallery-dl merges via yt-dlp
     urls: dict[int, tuple[str, str]] = field(default_factory=dict)  # position -> (direct CDN url, ext); worker-only
+    variants: dict[int, tuple[FastVideoVariant, ...]] = field(default_factory=dict)  # position -> sorted mp4 variants
+    durations: dict[int, float] = field(default_factory=dict)  # position -> duration_seconds
+    direct_telegram_ok: bool = False  # True when CDN URLs are public & cookie-free (eligible for Telegram URL send)
     yt_info_json: Path | None = None
     yt_sources: dict[str, YtFormatSource] = field(default_factory=dict)
     yt_duration: float | None = None
@@ -107,6 +140,9 @@ class DiscoveryCache:
         self._data[str(job_id)] = value
         while len(self._data) > self._capacity:
             self._data.popitem(last=False)
+
+    def peek(self, job_id: object) -> Discovered | None:
+        return self._data.get(str(job_id))
 
     def take(self, job_id: object) -> Discovered | None:
         return self._data.pop(str(job_id), None)

@@ -15,6 +15,7 @@ import asyncio
 import contextlib
 import ipaddress
 import socket
+import sys
 from collections.abc import Awaitable, Callable, Iterable
 from typing import Any
 
@@ -23,12 +24,23 @@ import aiohttp.abc
 from app.core.errors import BotError, ErrorCode
 
 TCP_BUFFER_BYTES = 1 << 20  # 1 MiB (vs Windows' 64 KiB default) for high-RTT uploads/downloads
+# Linux autotunes each TCP connection's buffers up to net.ipv4.tcp_wmem/tcp_rmem max (4 MiB / 6 MiB by default).
+# An explicit SO_SNDBUF/SO_RCVBUF LOCKS the buffer (autotuning off) and is silently clamped to
+# net.core.wmem_max/rmem_max - 208 KiB on stock kernels - so on Linux "enlarging" would actually cap a long-RTT
+# upload (e.g. a VPS in Singapore -> api.telegram.org in Amsterdam, ~160 ms) to a fraction of the link.
+_KERNEL_AUTOTUNES_BUFFERS = sys.platform.startswith("linux")
 
 
 def tune_socket(sock: socket.socket) -> None:
-    """Enable TCP_NODELAY and enlarge send/recv buffers (never shrinking larger OS defaults)."""
+    """Enable TCP_NODELAY and enlarge send/recv buffers (never shrinking larger OS defaults).
+
+    On Linux only TCP_NODELAY is set: the kernel's per-connection autotuning already grows past 1 MiB,
+    and setting a size would disable it (see `_KERNEL_AUTOTUNES_BUFFERS`).
+    """
     with contextlib.suppress(OSError):
         sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+    if _KERNEL_AUTOTUNES_BUFFERS:
+        return
     for opt in (socket.SO_SNDBUF, socket.SO_RCVBUF):
         with contextlib.suppress(OSError):
             if sock.getsockopt(socket.SOL_SOCKET, opt) < TCP_BUFFER_BYTES:
@@ -36,7 +48,7 @@ def tune_socket(sock: socket.socket) -> None:
 
 
 def tuned_socket_factory(addr_info: tuple[Any, ...]) -> socket.socket:
-    """aiohttp / aiohappyeyeballs socket_factory with TCP_NODELAY and 1 MiB socket buffers."""
+    """aiohttp / aiohappyeyeballs socket_factory: TCP_NODELAY, plus >= 1 MiB buffers where the OS needs it."""
     sock = socket.socket(family=addr_info[0], type=addr_info[1], proto=addr_info[2])
     tune_socket(sock)
     return sock
